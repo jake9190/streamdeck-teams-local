@@ -4,16 +4,21 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.1.1] - 2026-06-24
 
 ### Fixed
 - Reaction responsiveness regression: removed an expensive full-desktop UI Automation
   search that ran on every reaction press (the rapid-repeat "fast path"). Reactions are
   snappy again.
+- Focus restoration re-activates the window that actually had focus, not the topmost
+  z-order window (which could be an always-on-top widget).
+- Window-order restoration no longer makes normal windows always-on-top: always-on-top
+  windows are excluded from the reorder so the `SetWindowPos` topmost flag can't cascade.
 
 ### Changed
 - Focus restoration now restores the **exact window z-order** that was in place before
-  the press (not just the previously focused window), when the per-key setting is on.
+  the press (not just the previously focused window), when the per-key setting is on,
+  including when focus has already returned to the user's window.
 
 ## [1.1.0] - 2026-06-24
 
