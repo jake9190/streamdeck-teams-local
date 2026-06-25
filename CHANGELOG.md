@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0] - 2026-06-25
+
+### Added
+- **Select Audio Device** action: switch the meeting microphone and/or speaker to a
+  pre-selected device. The Property Inspector auto-populates mic/speaker dropdowns from the
+  active Windows audio endpoints (each defaulting to "leave unchanged"), and a Button icon
+  setting renders the key as a speaker, a headset, or both.
+
+### Changed
+- Mute, camera, raise-hand, share and leave now actuate via the focus-free MSAA default
+  action (`LegacyIAccessible.DoDefaultAction`), so pressing them no longer steals focus or
+  brings Teams to the foreground.
+
+### Fixed
+- Raise-hand state now syncs both ways: it is read from the self-video tile (which reports
+  "Hand raised") instead of the raise-hand button, whose Name never changes. Raising or
+  lowering your hand in Teams now updates the key.
+
 ## [1.1.2] - 2026-06-24
 
 ### Fixed
