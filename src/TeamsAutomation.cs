@@ -15,6 +15,7 @@ public sealed class TeamsAutomation : IDisposable
     private const int PollIntervalMs = 600;
     private const int MissThreshold = 3;        // consecutive misses before declaring "no meeting"
     private const int OptimisticHoldMs = 1500;  // honor an optimistic toggle this long
+    private const int ReactionCollapseIdleMs = 650; // close the reaction flyout this long after the last press
 
     private static readonly string[] TeamsProcessNames = { "ms-teams", "msteams", "Teams" };
 
@@ -28,6 +29,9 @@ public sealed class TeamsAutomation : IDisposable
     // identity is stable while the window lives, so we avoid a fresh descendant tree
     // walk for every control on every poll and every press.
     private readonly Dictionary<string, AutomationElement> _controls = new(StringComparer.Ordinal);
+
+    // Pending "close the reaction flyout" task, rescheduled on every reaction press.
+    private CancellationTokenSource? _collapseCts;
 
     // Last-known raw control state (preserved across transient read failures).
     private bool _teamsRunning;
@@ -352,59 +356,70 @@ public sealed class TeamsAutomation : IDisposable
         var react = GetControl(window, "reaction-menu-button");
         if (react is null) { Log.Warn("reaction-menu-button not found"); return false; }
 
-        // Open the flyout (React supports ExpandCollapse, not Invoke).
-        ExpandCollapsePattern? expand = null;
-        if (react.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var ecp))
-        {
-            expand = (ExpandCollapsePattern)ecp;
-            try { expand.Expand(); } catch { }
-        }
-        else
-        {
-            Invoke(react); // fallback
-        }
-
-        // Poll briefly for the reaction item (it lives in a popup, not the meeting window subtree).
-        // Check immediately first, then in tight 15ms steps, breaking as soon as it appears.
+        react.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var ecp);
+        var expand = ecp as ExpandCollapsePattern;
         var idCond = new PropertyCondition(AutomationElement.AutomationIdProperty, reactionId);
-        AutomationElement? target = null;
-        for (int i = 0; i < 25 && target is null; i++)
+
+        // Fast path for rapid repeats: if the flyout is still open the item is already
+        // present, so just click it again without paying for a reopen + animation.
+        var target = TryFindReaction(react, idCond);
+        if (target is null)
         {
-            try
+            // Open the flyout (React supports ExpandCollapse, not Invoke).
+            if (expand is not null) { try { expand.Expand(); } catch { } }
+            else Invoke(react); // fallback
+
+            for (int i = 0; i < 25 && target is null; i++)
             {
-                target = react.FindFirst(TreeScope.Descendants, idCond)
-                      ?? AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond);
+                target = TryFindReaction(react, idCond);
+                if (target is null) Thread.Sleep(15);
             }
-            catch { }
-            if (target is null) Thread.Sleep(15);
         }
 
         bool ok = false;
-        if (target is not null)
-            ok = Invoke(target);
-        else
-            Log.Warn($"reaction item not found: {reactionId}");
+        if (target is not null) ok = Invoke(target);
+        else Log.Warn($"reaction item not found: {reactionId}");
 
-        // Requirement: close the flyout when done.
-        CloseReactionFlyout(expand);
+        // Keep the flyout open across a burst of presses, then close once the user
+        // stops; every press reschedules the close.
+        ScheduleDeferredCollapse(expand);
         return ok;
     }
 
-    private static void CloseReactionFlyout(ExpandCollapsePattern? expand)
+    private static AutomationElement? TryFindReaction(AutomationElement react, PropertyCondition idCond)
     {
         try
         {
-            if (expand is not null)
-            {
-                expand.Collapse();
-                return;
-            }
+            return react.FindFirst(TreeScope.Descendants, idCond)
+                ?? AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond);
         }
-        catch { /* fall through to ESC */ }
+        catch { return null; }
+    }
 
-        // Fallback: only press Escape if Teams actually holds focus, so we never
-        // send a stray Escape into whatever app the user is working in.
-        try { if (IsForegroundTeams()) SendEscape(); } catch { }
+    /// <summary>Close the reaction flyout a short while after the last reaction press.</summary>
+    private void ScheduleDeferredCollapse(ExpandCollapsePattern? expand)
+    {
+        _collapseCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _collapseCts = cts;
+
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(ReactionCollapseIdleMs, cts.Token); }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+
+            lock (_uia)
+            {
+                try { expand?.Collapse(); }
+                catch
+                {
+                    // Fallback: only Escape if Teams holds focus, so we never send a
+                    // stray Escape into whatever app the user is working in.
+                    try { if (IsForegroundTeams()) SendEscape(); } catch { }
+                }
+            }
+        });
     }
 
     // ---- Win32 interop ------------------------------------------------------

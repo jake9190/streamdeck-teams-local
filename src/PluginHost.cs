@@ -69,14 +69,20 @@ public sealed class PluginHost
         if (d.Kind == ActionKind.Reaction)
             await _sd.ShowOkAsync(context);
 
-        // Fast confirmation polls so the real state catches up quickly.
-        _ = Task.Run(async () =>
+        // Toggles change observable state, so run fast confirmation polls to reconcile
+        // the key quickly. Reactions don't change state, so skip the extra polls and
+        // keep UIA free for rapid repeat presses.
+        if (d.Kind is ActionKind.ToggleMute or ActionKind.ToggleCamera
+            or ActionKind.RaiseHand or ActionKind.ShareScreen)
         {
-            await Task.Delay(180);
-            _teams.PollNow();
-            await Task.Delay(400);
-            _teams.PollNow();
-        });
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(180);
+                _teams.PollNow();
+                await Task.Delay(400);
+                _teams.PollNow();
+            });
+        }
     }
 
     private void OnSnapshotChanged(TeamsSnapshot snap)

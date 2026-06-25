@@ -15,7 +15,8 @@ $project    = Join-Path $repoRoot "src\MsTeamsLocal.csproj"
 $packageDir = Join-Path $repoRoot "com.local.msteams-local.sdPlugin"
 
 Write-Host "Publishing $project ($Configuration) -> $packageDir" -ForegroundColor Cyan
-dotnet publish $project -c $Configuration -r win-x64 --self-contained false -o $packageDir
+# Self-contained so end users do NOT need the .NET Desktop Runtime installed.
+dotnet publish $project -c $Configuration -r win-x64 --self-contained true -o $packageDir
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
 
 $exe = Join-Path $packageDir "msteams-local.exe"

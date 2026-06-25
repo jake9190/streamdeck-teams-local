@@ -41,8 +41,8 @@ Highlights:
 - Windows 10 / 11
 - [Elgato Stream Deck](https://www.elgato.com/stream-deck) software 6.5+
 - The **new** Microsoft Teams desktop client
-- [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (or newer)
-  — the plugin is a framework-dependent `net8.0-windows` app
+- **No .NET runtime install required** — the plugin is published **self-contained**, so
+  the .NET 8 runtime is bundled with the executable.
 - [.NET SDK 8+](https://dotnet.microsoft.com/download) to build from source
 
 ---

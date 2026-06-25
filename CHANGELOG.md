@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] - 2026-06-24
+
+### Added
+- Self-contained publishing: the .NET runtime is bundled, so **end users no longer
+  need the .NET Desktop Runtime installed**.
+
+### Changed
+- The Surprised reaction icon is now an open-mouthed "wow" face instead of X-eyes.
+- Reactions can be pressed rapidly in a row: the reaction flyout is kept open across a
+  burst of presses and closed shortly after the last one, so repeats reuse the open
+  flyout instead of reopening each time. Reactions also skip the post-press
+  confirmation polls to keep UI Automation free during bursts.
+
 ## [1.0.0] - 2026-06-24
 
 ### Added

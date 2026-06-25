@@ -3,9 +3,13 @@
 ## Prerequisites
 
 - .NET SDK 8.0 or newer (`dotnet --version`)
-- The .NET 8 **Windows Desktop** runtime (provides the UI Automation assemblies)
+- The .NET 8 **Windows Desktop** targeting pack (ships with the SDK on Windows; provides
+  the UI Automation / WPF assemblies used at build time)
 - Elgato Stream Deck software
 - The new Microsoft Teams desktop client (for live testing)
+
+> End users do **not** need a .NET runtime installed — the plugin is published
+> self-contained (`build.ps1` uses `--self-contained true`), bundling the runtime.
 
 ## Build
 
@@ -15,7 +19,7 @@ dotnet build src/MsTeamsLocal.csproj -c Release
 
 ## Publish into the plugin package
 
-`build.ps1` publishes a framework-dependent build into the `.sdPlugin` package and
+`build.ps1` publishes a self-contained build into the `.sdPlugin` package and
 (re)generates the icon files:
 
 ```powershell
@@ -25,7 +29,7 @@ dotnet build src/MsTeamsLocal.csproj -c Release
 This is equivalent to:
 
 ```powershell
-dotnet publish src/MsTeamsLocal.csproj -c Release -r win-x64 --self-contained false `
+dotnet publish src/MsTeamsLocal.csproj -c Release -r win-x64 --self-contained true `
     -o com.local.msteams-local.sdPlugin
 ./com.local.msteams-local.sdPlugin/msteams-local.exe --emit-icons
 ```
