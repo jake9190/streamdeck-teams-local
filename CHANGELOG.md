@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- Reaction keys now show their own glyph (thumbs-up, heart, applause, laugh, surprised)
+  when dimmed/disabled, instead of all showing a generic gray smiley.
+
 ## [1.1.1] - 2026-06-24
 
 ### Fixed

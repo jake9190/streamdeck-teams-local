@@ -40,8 +40,12 @@ public static class IconRenderer
     public static IconVisual GetVisual(ActionDescriptor d, TeamsSnapshot s)
     {
         // Disabled look when there's no meeting to act on (or Teams isn't running).
+        // Reactions still show their own glyph (just dimmed) so each key stays identifiable.
         if (!s.TeamsRunning || !s.MeetingActive)
-            return new IconVisual(BgDisabled, FgDisabled, IdleGlyph(d.Kind), false);
+        {
+            var disabledGlyph = d.Kind == ActionKind.Reaction ? ReactionGlyph(d.Id) : IdleGlyph(d.Kind);
+            return new IconVisual(BgDisabled, FgDisabled, disabledGlyph, false);
+        }
 
         return d.Kind switch
         {
