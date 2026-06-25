@@ -1,0 +1,13 @@
+# Normalize line endings.
+* text=auto eol=crlf
+
+# Scripts
+*.ps1 text eol=crlf
+
+# Treat SVG as text but don't let GitHub language stats count generated icons.
+*.svg text
+com.local.msteams-local.sdPlugin/imgs/** linguist-generated=true
+
+# Binary
+*.png binary
+*.streamDeckPlugin binary

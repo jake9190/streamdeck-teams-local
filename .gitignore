@@ -1,0 +1,31 @@
+# Build outputs published into the plugin package.
+# Everything in the package folder is generated EXCEPT manifest.json and imgs/.
+com.local.msteams-local.sdPlugin/*
+!com.local.msteams-local.sdPlugin/manifest.json
+!com.local.msteams-local.sdPlugin/imgs/
+
+# .NET build artifacts
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+project.lock.json
+artifacts/
+
+# Distribution archives
+dist/
+*.streamDeckPlugin
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Logs
+logs/
+*.log

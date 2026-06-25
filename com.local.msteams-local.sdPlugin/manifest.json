@@ -1,0 +1,107 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "UUID": "com.local.msteams-local",
+  "Name": "MS Teams Local",
+  "Version": "1.0.0",
+  "Author": "jawelch",
+  "Description": "Fast, native control of Microsoft Teams meetings: mute, camera, hand, share, leave and reactions, with live state on the keys.",
+  "Icon": "imgs/plugin/category-icon",
+  "Category": "MS Teams Local",
+  "CategoryIcon": "imgs/plugin/category-icon",
+  "CodePath": "msteams-local.exe",
+  "SDKVersion": 2,
+  "Actions": [
+    {
+      "UUID": "com.local.msteams-local.toggle-mute",
+      "Name": "Mute / Unmute",
+      "Icon": "imgs/actions/toggle-mute/icon",
+      "Tooltip": "Mute or unmute your microphone in the current Teams meeting",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/toggle-mute/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.toggle-camera",
+      "Name": "Camera On / Off",
+      "Icon": "imgs/actions/toggle-camera/icon",
+      "Tooltip": "Turn your camera on or off in the current Teams meeting",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/toggle-camera/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.raise-hand",
+      "Name": "Raise / Lower Hand",
+      "Icon": "imgs/actions/raise-hand/icon",
+      "Tooltip": "Raise or lower your hand in the current Teams meeting",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/raise-hand/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.share-screen",
+      "Name": "Share Screen",
+      "Icon": "imgs/actions/share-screen/icon",
+      "Tooltip": "Open the share tray in the current Teams meeting",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/share-screen/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.leave-meeting",
+      "Name": "Leave Meeting",
+      "Icon": "imgs/actions/leave-meeting/icon",
+      "Tooltip": "Leave the current Teams meeting",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/leave-meeting/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.react-like",
+      "Name": "React: Like",
+      "Icon": "imgs/actions/react-like/icon",
+      "Tooltip": "Send a Like reaction",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/react-like/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.react-love",
+      "Name": "React: Love",
+      "Icon": "imgs/actions/react-love/icon",
+      "Tooltip": "Send a Love reaction",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/react-love/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.react-applause",
+      "Name": "React: Applause",
+      "Icon": "imgs/actions/react-applause/icon",
+      "Tooltip": "Send an Applause reaction",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/react-applause/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.react-laugh",
+      "Name": "React: Laugh",
+      "Icon": "imgs/actions/react-laugh/icon",
+      "Tooltip": "Send a Laugh reaction",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/react-laugh/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.react-surprised",
+      "Name": "React: Surprised",
+      "Icon": "imgs/actions/react-surprised/icon",
+      "Tooltip": "Send a Surprised reaction",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/react-surprised/key", "ShowTitle": false }]
+    }
+  ],
+  "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
+  "Software": { "MinimumVersion": "6.5" }
+}
