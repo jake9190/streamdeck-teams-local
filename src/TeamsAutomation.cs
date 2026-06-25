@@ -15,7 +15,6 @@ public sealed class TeamsAutomation : IDisposable
     private const int PollIntervalMs = 600;
     private const int MissThreshold = 3;        // consecutive misses before declaring "no meeting"
     private const int OptimisticHoldMs = 1500;  // honor an optimistic toggle this long
-    private const int ReactionCollapseIdleMs = 650; // close the reaction flyout this long after the last press
 
     private static readonly string[] TeamsProcessNames = { "ms-teams", "msteams", "Teams" };
 
@@ -29,9 +28,6 @@ public sealed class TeamsAutomation : IDisposable
     // identity is stable while the window lives, so we avoid a fresh descendant tree
     // walk for every control on every poll and every press.
     private readonly Dictionary<string, AutomationElement> _controls = new(StringComparer.Ordinal);
-
-    // Pending "close the reaction flyout" task, rescheduled on every reaction press.
-    private CancellationTokenSource? _collapseCts;
 
     // Last-known raw control state (preserved across transient read failures).
     private bool _teamsRunning;
@@ -282,11 +278,11 @@ public sealed class TeamsAutomation : IDisposable
     }
 
     /// <summary>Perform the control action in-process. Returns true on success.</summary>
-    /// <param name="restoreFocus">When true, return focus to the prior window if Teams steals it.</param>
+    /// <param name="restoreFocus">When true, restore the window stacking if Teams steals focus.</param>
     public bool Trigger(ActionDescriptor d, bool restoreFocus = true)
     {
-        // Remember the window the user was on so we can hand focus back if Teams steals it.
-        IntPtr previousForeground = GetForegroundWindow();
+        // Snapshot the window stacking so we can put it back exactly if Teams jumps forward.
+        IntPtr[] windowOrder = restoreFocus ? CaptureWindowOrder() : Array.Empty<IntPtr>();
         bool result = false;
         try
         {
@@ -315,7 +311,7 @@ public sealed class TeamsAutomation : IDisposable
         finally
         {
             if (restoreFocus)
-                RestoreForeground(previousForeground);
+                RestoreWindowOrder(windowOrder);
         }
         return result;
     }
@@ -356,70 +352,48 @@ public sealed class TeamsAutomation : IDisposable
         var react = GetControl(window, "reaction-menu-button");
         if (react is null) { Log.Warn("reaction-menu-button not found"); return false; }
 
-        react.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var ecp);
-        var expand = ecp as ExpandCollapsePattern;
-        var idCond = new PropertyCondition(AutomationElement.AutomationIdProperty, reactionId);
-
-        // Fast path for rapid repeats: if the flyout is still open the item is already
-        // present, so just click it again without paying for a reopen + animation.
-        var target = TryFindReaction(react, idCond);
-        if (target is null)
+        // Open the flyout (React supports ExpandCollapse, not Invoke).
+        ExpandCollapsePattern? expand = null;
+        if (react.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var ecp))
         {
-            // Open the flyout (React supports ExpandCollapse, not Invoke).
-            if (expand is not null) { try { expand.Expand(); } catch { } }
-            else Invoke(react); // fallback
+            expand = (ExpandCollapsePattern)ecp;
+            try { expand.Expand(); } catch { }
+        }
+        else
+        {
+            Invoke(react); // fallback
+        }
 
-            for (int i = 0; i < 25 && target is null; i++)
-            {
-                target = TryFindReaction(react, idCond);
-                if (target is null) Thread.Sleep(15);
-            }
+        // Poll briefly for the reaction item (it lives in a popup, not the meeting window
+        // subtree). Only search AFTER expanding, and break the moment it appears.
+        var idCond = new PropertyCondition(AutomationElement.AutomationIdProperty, reactionId);
+        AutomationElement? target = null;
+        for (int i = 0; i < 25 && target is null; i++)
+        {
+            try { target = AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond); }
+            catch { }
+            if (target is null) Thread.Sleep(15);
         }
 
         bool ok = false;
         if (target is not null) ok = Invoke(target);
         else Log.Warn($"reaction item not found: {reactionId}");
 
-        // Keep the flyout open across a burst of presses, then close once the user
-        // stops; every press reschedules the close.
-        ScheduleDeferredCollapse(expand);
+        CloseReactionFlyout(expand);
         return ok;
     }
 
-    private static AutomationElement? TryFindReaction(AutomationElement react, PropertyCondition idCond)
+    private static void CloseReactionFlyout(ExpandCollapsePattern? expand)
     {
         try
         {
-            return react.FindFirst(TreeScope.Descendants, idCond)
-                ?? AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond);
+            if (expand is not null) { expand.Collapse(); return; }
         }
-        catch { return null; }
-    }
+        catch { /* fall through to ESC */ }
 
-    /// <summary>Close the reaction flyout a short while after the last reaction press.</summary>
-    private void ScheduleDeferredCollapse(ExpandCollapsePattern? expand)
-    {
-        _collapseCts?.Cancel();
-        var cts = new CancellationTokenSource();
-        _collapseCts = cts;
-
-        _ = Task.Run(async () =>
-        {
-            try { await Task.Delay(ReactionCollapseIdleMs, cts.Token); }
-            catch (TaskCanceledException) { return; }
-            if (cts.IsCancellationRequested) return;
-
-            lock (_uia)
-            {
-                try { expand?.Collapse(); }
-                catch
-                {
-                    // Fallback: only Escape if Teams holds focus, so we never send a
-                    // stray Escape into whatever app the user is working in.
-                    try { if (IsForegroundTeams()) SendEscape(); } catch { }
-                }
-            }
-        });
+        // Fallback: only Escape if Teams holds focus, so we never send a stray Escape
+        // into whatever app the user is working in.
+        try { if (IsForegroundTeams()) SendEscape(); } catch { }
     }
 
     // ---- Win32 interop ------------------------------------------------------
@@ -478,5 +452,72 @@ public sealed class TeamsAutomation : IDisposable
             if (attachedCurrent) AttachThreadInput(thisThread, currentThread, false);
             if (attachedTarget) AttachThreadInput(thisThread, targetThread, false);
         }
+    }
+
+    // ---- Window z-order capture / restore -----------------------------------
+
+    private static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_NOOWNERZORDER = 0x0200;
+    private const uint SWP_ASYNCWINDOWPOS = 0x4000;
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern IntPtr BeginDeferWindowPos(int nNumWindows);
+    [DllImport("user32.dll")] private static extern IntPtr DeferWindowPos(
+        IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")] private static extern bool EndDeferWindowPos(IntPtr hWinPosInfo);
+
+    /// <summary>Snapshot the visible, non-minimized top-level windows in z-order (topmost first).</summary>
+    private static IntPtr[] CaptureWindowOrder()
+    {
+        var list = new List<IntPtr>(64);
+        try
+        {
+            EnumWindows((h, _) =>
+            {
+                if (IsWindowVisible(h) && !IsIconic(h)) list.Add(h);
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch (Exception ex) { Log.Error("CaptureWindowOrder failed", ex); }
+        return list.ToArray();
+    }
+
+    /// <summary>
+    /// Reapply a previously captured z-order so the exact window stacking from before the
+    /// action is restored — not just the foreground window. No-op when nothing changed.
+    /// </summary>
+    private static void RestoreWindowOrder(IntPtr[] order)
+    {
+        if (order.Length == 0) return;
+        if (GetForegroundWindow() == order[0]) return; // foreground never changed -> nothing to do
+
+        try
+        {
+            var hdwp = BeginDeferWindowPos(order.Length);
+            if (hdwp != IntPtr.Zero)
+            {
+                // Batch the moves so the whole stack is reordered in one pass (minimal flicker).
+                const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+                IntPtr insertAfter = HWND_TOP;
+                foreach (var hwnd in order) // top -> bottom
+                {
+                    hdwp = DeferWindowPos(hdwp, hwnd, insertAfter, 0, 0, 0, 0, flags);
+                    if (hdwp == IntPtr.Zero) break;
+                    insertAfter = hwnd;
+                }
+                if (hdwp != IntPtr.Zero) EndDeferWindowPos(hdwp);
+            }
+        }
+        catch (Exception ex) { Log.Error("RestoreWindowOrder failed", ex); }
+
+        // Re-activate the window that was on top (also restores keyboard focus).
+        RestoreForeground(order[0]);
     }
 }
