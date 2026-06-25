@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.1.2] - 2026-06-24
 
 ### Fixed
 - Reaction keys now show their own glyph (thumbs-up, heart, applause, laugh, surprised)
