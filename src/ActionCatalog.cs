@@ -9,6 +9,7 @@ public enum ActionKind
     ShareScreen,
     Leave,
     Reaction,
+    AudioDevice,
 }
 
 /// <summary>Static description of a Stream Deck action exposed by this plugin.</summary>
@@ -35,6 +36,9 @@ public static class ActionCatalog
         new ActionDescriptor("react-applause",  "Applause",  ActionKind.Reaction, "applause-button"),
         new ActionDescriptor("react-laugh",     "Laugh",     ActionKind.Reaction, "laugh-button"),
         new ActionDescriptor("react-surprised", "Surprised", ActionKind.Reaction, "surprised-button"),
+
+        // Switches the meeting's microphone and/or speaker to a pre-selected device pairing.
+        new ActionDescriptor("audio-device", "Audio Device", ActionKind.AudioDevice),
     };
 
     private static readonly Dictionary<string, ActionDescriptor> ById =

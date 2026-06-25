@@ -26,9 +26,9 @@ public static class IconRenderer
     private const string FgDisabled = "#52555E";
 
     /// <summary>Build the setImage data URI for an action given the current state.</summary>
-    public static string Render(ActionDescriptor d, TeamsSnapshot s)
+    public static string Render(ActionDescriptor d, TeamsSnapshot s, string? audioIconType = null)
     {
-        var svg = BuildSvg(d, s);
+        var svg = BuildSvg(d, s, audioIconType);
         var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(svg));
         return "data:image/svg+xml;base64," + b64;
     }
@@ -37,13 +37,18 @@ public static class IconRenderer
     public readonly record struct IconVisual(string Background, string Foreground, string GlyphPath, bool HandBadge);
 
     /// <summary>Decide background colour, glyph colour, glyph path and badge for an action+state.</summary>
-    public static IconVisual GetVisual(ActionDescriptor d, TeamsSnapshot s)
+    public static IconVisual GetVisual(ActionDescriptor d, TeamsSnapshot s, string? audioIconType = null)
     {
         // Disabled look when there's no meeting to act on (or Teams isn't running).
         // Reactions still show their own glyph (just dimmed) so each key stays identifiable.
         if (!s.TeamsRunning || !s.MeetingActive)
         {
-            var disabledGlyph = d.Kind == ActionKind.Reaction ? ReactionGlyph(d.Id) : IdleGlyph(d.Kind);
+            string disabledGlyph = d.Kind switch
+            {
+                ActionKind.Reaction => ReactionGlyph(d.Id),
+                ActionKind.AudioDevice => AudioGlyph(audioIconType),
+                _ => IdleGlyph(d.Kind),
+            };
             return new IconVisual(BgDisabled, FgDisabled, disabledGlyph, false);
         }
 
@@ -63,14 +68,15 @@ public static class IconRenderer
                 s.Sharing ? Paths.MonitorFill : Paths.MonitorOutline, false),
             ActionKind.Leave => new IconVisual(BgLeave, FgWhite, Paths.PhoneDisconnect, false),
             ActionKind.Reaction => new IconVisual(BgNeutral, ReactionColor(d.Id), ReactionGlyph(d.Id), false),
+            ActionKind.AudioDevice => new IconVisual(BgNeutral, FgBlue, AudioGlyph(audioIconType), false),
             _ => new IconVisual(BgNeutral, FgWhite, Paths.MonitorOutline, false),
         };
     }
 
     /// <summary>Raw SVG markup (used for emitting the static manifest icon files).</summary>
-    public static string BuildSvg(ActionDescriptor d, TeamsSnapshot s)
+    public static string BuildSvg(ActionDescriptor d, TeamsSnapshot s, string? audioIconType = null)
     {
-        var v = GetVisual(d, s);
+        var v = GetVisual(d, s, audioIconType);
         var sb = new StringBuilder(2048);
         sb.Append("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"144\" height=\"144\" viewBox=\"0 0 144 144\">");
         sb.Append("<rect x=\"6\" y=\"6\" width=\"132\" height=\"132\" rx=\"28\" fill=\"").Append(v.Background).Append("\"/>");
@@ -91,7 +97,16 @@ public static class IconRenderer
         ActionKind.ShareScreen => Paths.MonitorOutline,
         ActionKind.Leave => Paths.PhoneDisconnect,
         ActionKind.Reaction => Paths.SmileyFill,
+        ActionKind.AudioDevice => Paths.SpeakerHeadset,
         _ => Paths.MonitorOutline,
+    };
+
+    /// <summary>Glyph for the Audio Device button, chosen by its configured icon type.</summary>
+    private static string AudioGlyph(string? type) => type switch
+    {
+        "speaker" => Paths.SpeakerOnly,
+        "headset" => Paths.HeadsetOnly,
+        _ => Paths.SpeakerHeadset,
     };
 
     private static string ReactionGlyph(string id) => id switch
@@ -132,5 +147,28 @@ public static class IconRenderer
         public const string SmileyFill = "M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24ZM92,96a12,12,0,1,1-12,12A12,12,0,0,1,92,96Zm82.92,60c-10.29,17.79-27.39,28-46.92,28s-36.63-10.2-46.92-28a8,8,0,1,1,13.84-8c7.47,12.91,19.21,20,33.08,20s25.61-7.1,33.08-20a8,8,0,1,1,13.84,8ZM164,120a12,12,0,1,1,12-12A12,12,0,0,1,164,120Z";
         // Open-mouth "wow" face: round eyes + a round open mouth (holes wound opposite the face).
         public const string SmileyOpenFill = "M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24ZM92,91a13,13,0,1,1-13,13A13,13,0,0,1,92,91ZM164,91a13,13,0,1,1-13,13A13,13,0,0,1,164,91ZM128,146a22,22,0,1,1-22,22A22,22,0,0,1,128,146Z";
+
+        // Original composite for the Audio Device action: a speaker silhouette (left) beside a
+        // headset -- two ear cups joined by a band (right). Authored as plain filled shapes so it
+        // renders identically in the SVG and WPF paths without copying any icon set's data.
+        public const string SpeakerHeadset =
+            "M40,106 H64 L96,78 V178 L64,150 H40 Z" +
+            "M148,124 H156 A8,8 0 0 1 164,132 V168 A8,8 0 0 1 156,176 H148 A8,8 0 0 1 140,168 V132 A8,8 0 0 1 148,124 Z" +
+            "M220,124 H228 A8,8 0 0 1 236,132 V168 A8,8 0 0 1 228,176 H220 A8,8 0 0 1 212,168 V132 A8,8 0 0 1 220,124 Z" +
+            "M140,128 A48,48 0 0 1 236,128 L228,128 A40,40 0 0 0 148,128 Z";
+
+        // Centred speaker with two sound waves (Audio Device "Speaker" icon type).
+        public const string SpeakerOnly =
+            "M64,106 H94 L134,72 V184 L94,150 H64 Z" +
+            "M155,107 A30,30 0 0 1 155,149 L150,144 A22,22 0 0 0 150,112 Z" +
+            "M171,91 A52,52 0 0 1 171,165 L165,159 A44,44 0 0 0 165,97 Z";
+
+        // Centred headset: two ear cups, a band, and a boom mic (Audio Device "Headset" icon type).
+        public const string HeadsetOnly =
+            "M84,122 H94 A8,8 0 0 1 102,130 V178 A8,8 0 0 1 94,186 H84 A8,8 0 0 1 76,178 V130 A8,8 0 0 1 84,122 Z" +
+            "M162,122 H172 A8,8 0 0 1 180,130 V178 A8,8 0 0 1 172,186 H162 A8,8 0 0 1 154,178 V130 A8,8 0 0 1 162,122 Z" +
+            "M76,128 A52,52 0 0 1 180,128 L172,128 A44,44 0 0 0 84,128 Z" +
+            "M180,168 Q178,202 138,206 L138,196 Q166,194 168,168 Z" +
+            "M117,200 A11,11 0 1 1 139,200 A11,11 0 1 1 117,200 Z";
     }
 }

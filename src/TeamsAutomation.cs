@@ -22,6 +22,7 @@ public sealed class TeamsAutomation : IDisposable
     private readonly object _stateGate = new();
 
     private AutomationElement? _meetingWindow;
+    private AutomationElement? _selfVideo; // local participant's video tile (for hand-raised reads)
     private int _missCount;
 
     // Cache of toolbar control elements for the current meeting window. The element
@@ -62,6 +63,11 @@ public sealed class TeamsAutomation : IDisposable
     {
         _running = false;
         try { _pollThread?.Join(1000); } catch { }
+        if (_comAutomation is not null)
+        {
+            try { Marshal.FinalReleaseComObject(_comAutomation); } catch { }
+            _comAutomation = null;
+        }
     }
 
     // ---- Polling ------------------------------------------------------------
@@ -107,8 +113,10 @@ public sealed class TeamsAutomation : IDisposable
                 // Read each control; keep the previous value if a read fails/returns unknown.
                 muted = ReadBool(window, "microphone-button", "unmute") ?? _muted;
                 cameraOff = ReadBool(window, "video-button", "camera on") ?? _cameraOff;
-                handRaised = ReadBool(window, "raisehands-button", "lower") ?? _handRaised;
                 sharing = ReadBool(window, "share-button", "stop") ?? _sharing;
+                // The raise-hand button Name never changes, so hand state is read from the
+                // self-video tile's Name (it gains "Hand raised" when up).
+                handRaised = ReadHandRaised(window) ?? _handRaised;
             }
         }
 
@@ -233,6 +241,63 @@ public sealed class TeamsAutomation : IDisposable
         catch { return null; }
     }
 
+    /// <summary>
+    /// Reads whether the local hand is raised. Teams does not expose this on the raise-hand button
+    /// (its Name never changes), but the self-video tile's Name gains "Hand raised" when up. Returns
+    /// null when the self tile can't be found, so the caller keeps the last/optimistic value.
+    /// </summary>
+    private bool? ReadHandRaised(AutomationElement window)
+    {
+        try
+        {
+            var tile = SelfVideoTile(window);
+            if (tile is null) return null;
+            var name = tile.Current.Name;
+            if (string.IsNullOrEmpty(name)) return null;
+            return name.IndexOf("hand raised", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch { _selfVideo = null; return null; }
+    }
+
+    /// <summary>
+    /// The local participant's video tile (an Image whose Name starts with "Myself video"). Cached
+    /// and re-validated cheaply by name; only re-found (a scoped Image search) when the cache goes
+    /// stale, so the per-poll cost is one property read in the common case.
+    /// </summary>
+    private AutomationElement? SelfVideoTile(AutomationElement window)
+    {
+        if (_selfVideo is not null)
+        {
+            try
+            {
+                if (_selfVideo.Current.Name.StartsWith("Myself video", StringComparison.OrdinalIgnoreCase))
+                    return _selfVideo;
+            }
+            catch { }
+            _selfVideo = null;
+        }
+
+        try
+        {
+            var images = window.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image));
+            foreach (AutomationElement img in images)
+            {
+                try
+                {
+                    if (img.Current.Name.StartsWith("Myself video", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _selfVideo = img;
+                        return img;
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
+
     // ---- Process detection --------------------------------------------------
 
     private static bool IsTeamsRunning() => GetTeamsPids().Count > 0;
@@ -253,6 +318,87 @@ public sealed class TeamsAutomation : IDisposable
             catch { }
         }
         return pids;
+    }
+
+    // ---- Audio device selection ---------------------------------------------
+
+    /// <summary>
+    /// Switches the meeting's microphone and/or speaker to the given Windows device ids (each
+    /// optional -- null leaves that device unchanged). Opens Teams' audio options panel, selects
+    /// the matching device list items by AutomationId (which equals the Core Audio endpoint id),
+    /// then closes the panel. Returns true if at least one device was selected.
+    /// </summary>
+    public bool SetAudioDevices(string? micDeviceId, string? speakerDeviceId)
+    {
+        if (string.IsNullOrEmpty(micDeviceId) && string.IsNullOrEmpty(speakerDeviceId))
+        {
+            Log.Warn("audio device action has no mic or speaker configured");
+            return false;
+        }
+
+        lock (_uia)
+        {
+            try
+            {
+                var window = ResolveMeetingWindow(IsTeamsRunning());
+                if (window is null) return false;
+
+                var configure = FindIn(window, "audio-button-configure");
+                if (configure is null) { Log.Warn("audio-button-configure not found"); return false; }
+
+                // Open the audio options panel (it is a toggle/expand control).
+                ExpandCollapsePattern? ec = null;
+                if (configure.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var ecp))
+                {
+                    ec = (ExpandCollapsePattern)ecp;
+                    try { ec.Expand(); } catch { }
+                }
+                else
+                {
+                    Invoke(configure);
+                }
+
+                bool any = false;
+                if (!string.IsNullOrEmpty(speakerDeviceId)) any |= SelectAudioDevice(window, speakerDeviceId!);
+                if (!string.IsNullOrEmpty(micDeviceId)) any |= SelectAudioDevice(window, micDeviceId!);
+
+                // Close the panel.
+                try
+                {
+                    if (ec is not null) ec.Collapse();
+                    else Invoke(configure);
+                }
+                catch { }
+
+                return any;
+            }
+            catch (Exception ex) { Log.Error("SetAudioDevices failed", ex); return false; }
+        }
+    }
+
+    /// <summary>Selects the audio device list item whose AutomationId matches <paramref name="deviceId"/>.</summary>
+    private bool SelectAudioDevice(AutomationElement window, string deviceId)
+    {
+        // The panel renders asynchronously after opening; poll briefly for the item.
+        AutomationElement? item = null;
+        for (int i = 0; i < 30 && item is null; i++)
+        {
+            try { item = FindIn(window, deviceId); }
+            catch { }
+            if (item is null) Thread.Sleep(20);
+        }
+        if (item is null) { Log.Warn($"audio device not found in panel: {deviceId}"); return false; }
+
+        try
+        {
+            if (item.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var sip))
+            {
+                ((SelectionItemPattern)sip).Select();
+                return true;
+            }
+            return Invoke(item);
+        }
+        catch (Exception ex) { Log.Error($"select audio device failed: {deviceId}", ex); return false; }
     }
 
     // ---- Actions ------------------------------------------------------------
@@ -321,18 +467,52 @@ public sealed class TeamsAutomation : IDisposable
 
     private bool InvokeControl(AutomationElement window, string id)
     {
-        var el = GetControl(window, id);
-        if (el is null) { Log.Warn($"control not found: {id}"); return false; }
-        try { return Invoke(el); }
-        catch
+        // Actuate via the focus-free MSAA default action so toolbar toggles never steal focus
+        // or foreground Teams (managed InvokePattern.Invoke does both on Teams' Chromium controls).
+        IntPtr hwnd = (IntPtr)window.Current.NativeWindowHandle;
+        if (hwnd == IntPtr.Zero) { Log.Warn($"meeting window has no handle for {id}"); return false; }
+        return ComActuate(hwnd, id);
+    }
+
+    // ---- Focus-free MSAA actuation (COM UI Automation) ----------------------
+
+    private const int UIA_AutomationIdPropertyId = 30011;
+    private const int UIA_LegacyIAccessiblePatternId = 10018;
+    private static readonly Guid CLSID_CUIAutomation = new("ff48dba4-60ef-4201-aa87-54103eef594e");
+
+    private IUIAutomation? _comAutomation;
+
+    private IUIAutomation ComAutomation =>
+        _comAutomation ??= (IUIAutomation)Activator.CreateInstance(Type.GetTypeFromCLSID(CLSID_CUIAutomation)!)!;
+
+    /// <summary>
+    /// Finds the control by AutomationId within <paramref name="containerHwnd"/> and actuates it
+    /// with the focus-free MSAA default action (LegacyIAccessible.DoDefaultAction).
+    /// </summary>
+    private bool ComActuate(IntPtr containerHwnd, string automationId)
+    {
+        try
         {
-            // Cached element went stale between poll and press; re-find once.
-            _controls.Remove(id);
-            var fresh = FindIn(window, id);
-            if (fresh is null) return false;
-            _controls[id] = fresh;
-            return Invoke(fresh);
+            var automation = ComAutomation;
+            var container = automation.ElementFromHandle(containerHwnd);
+            if (container is null) return false;
+            object cond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, automationId);
+            var el = container.FindFirst(UiaTreeScope.Descendants, cond);
+            if (el is null) { Log.Warn($"control not found: {automationId}"); return false; }
+            return ComDoDefaultAction(el);
         }
+        catch (Exception ex) { Log.Error($"actuate {automationId} failed", ex); return false; }
+    }
+
+    private static bool ComDoDefaultAction(IUIAutomationElement el)
+    {
+        if (el.GetCurrentPattern(UIA_LegacyIAccessiblePatternId)
+            is IUIAutomationLegacyIAccessiblePattern legacy)
+        {
+            legacy.DoDefaultAction();
+            return true;
+        }
+        return false;
     }
 
     private static bool Invoke(AutomationElement el)

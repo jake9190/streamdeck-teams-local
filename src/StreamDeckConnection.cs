@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace MsTeamsLocal;
 
 /// <summary>A single inbound Stream Deck event we care about.</summary>
-public sealed record SdEvent(string Event, string? Action, string? Context, JsonElement? Settings = null);
+public sealed record SdEvent(string Event, string? Action, string? Context, JsonElement? Settings = null, JsonElement? Payload = null);
 
 /// <summary>
 /// Minimal Stream Deck plugin transport: connects to the Stream Deck software over
@@ -76,14 +76,15 @@ public sealed class StreamDeckConnection : IDisposable
 
             // Carry the action's settings (cloned so it survives doc disposal).
             JsonElement? settings = null;
-            if (root.TryGetProperty("payload", out var payload)
-                && payload.ValueKind == JsonValueKind.Object
-                && payload.TryGetProperty("settings", out var s))
+            JsonElement? payloadClone = null;
+            if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object)
             {
-                settings = s.Clone();
+                payloadClone = payload.Clone();
+                if (payload.TryGetProperty("settings", out var s))
+                    settings = s.Clone();
             }
 
-            EventReceived?.Invoke(new SdEvent(evt, action, context, settings));
+            EventReceived?.Invoke(new SdEvent(evt, action, context, settings, payloadClone));
         }
         catch (Exception ex)
         {
@@ -106,6 +107,9 @@ public sealed class StreamDeckConnection : IDisposable
 
     public Task ShowOkAsync(string context) =>
         SendRawAsync(new { @event = "showOk", context });
+
+    public Task SendToPropertyInspectorAsync(string context, string action, object payload) =>
+        SendRawAsync(new { @event = "sendToPropertyInspector", context, action, payload });
 
     private async Task SendRawAsync(object message, CancellationToken ct = default)
     {

@@ -13,54 +13,170 @@
       color: #d8d8d8;
       background: #2d2d2d;
     }
-    .row {
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
+    .row { display: flex; align-items: flex-start; gap: 8px; }
+    .field { margin-bottom: 12px; }
+    .field > label { display: block; margin-bottom: 4px; color: #c8c8c8; }
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 5px 6px;
+      color: #e8e8e8;
+      background: #3a3a3a;
+      border: 1px solid #555;
+      border-radius: 4px;
     }
     input[type="checkbox"] { margin-top: 2px; }
     label { line-height: 1.4; }
-    .hint { color: #8a8a8a; font-size: 11px; margin: 6px 0 0 24px; }
+    .hint { color: #8a8a8a; font-size: 11px; margin: 6px 0 0 0; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
-  <div class="row">
-    <input id="restoreFocus" type="checkbox" checked />
-    <label for="restoreFocus">Restore previous window after pressing</label>
+  <!-- Shown for the Audio Device action. -->
+  <div id="audioSection" class="hidden">
+    <div class="field">
+      <label for="iconType">Button icon</label>
+      <select id="iconType">
+        <option value="">Speaker &amp; headset</option>
+        <option value="speaker">Speaker</option>
+        <option value="headset">Headset</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="mic">Microphone</label>
+      <select id="mic"><option value="">(leave unchanged)</option></select>
+    </div>
+    <div class="field">
+      <label for="speaker">Speaker</label>
+      <select id="speaker"><option value="">(leave unchanged)</option></select>
+    </div>
+    <div class="hint">
+      Pressing the key switches the meeting to these devices. Choose "(leave unchanged)"
+      for either to keep the current one. The list shows your active Windows audio devices.
+    </div>
   </div>
-  <div class="hint">
-    When on, focus returns to the window you were using if Teams comes to the
-    foreground. Turn off to let Teams keep focus (e.g. to keep typing in chat).
+
+  <!-- Shown for every other action. -->
+  <div id="focusSection" class="hidden">
+    <div class="row">
+      <input id="restoreFocus" type="checkbox" checked />
+      <label for="restoreFocus">Restore previous window after pressing</label>
+    </div>
+    <div class="hint" style="margin-left: 24px;">
+      When on, focus returns to the window you were using if Teams comes to the
+      foreground. Turn off to let Teams keep focus (e.g. to keep typing in chat).
+    </div>
   </div>
 
   <script>
     let websocket = null;
     let pluginContext = null;
+    let actionUuid = null;
     let settings = {};
+
+    function isAudioAction() {
+      return typeof actionUuid === "string" && actionUuid.endsWith(".audio-device");
+    }
+
+    function saveSettings() {
+      websocket.send(JSON.stringify({
+        event: "setSettings",
+        context: pluginContext,
+        payload: settings
+      }));
+    }
+
+    function ensureOption(select, id, name) {
+      if (!id) return;
+      for (const opt of select.options) if (opt.value === id) return;
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = name || id;
+      select.appendChild(opt);
+    }
+
+    function populateDevices(payload) {
+      const mic = document.getElementById("mic");
+      const speaker = document.getElementById("speaker");
+      mic.length = 1;      // keep only the "leave unchanged" option
+      speaker.length = 1;
+      (payload.mics || []).forEach(function (d) { ensureOption(mic, d.id, d.name); });
+      (payload.speakers || []).forEach(function (d) { ensureOption(speaker, d.id, d.name); });
+      // Keep a saved device visible even if it is currently unplugged.
+      ensureOption(mic, settings.micId, settings.micName);
+      ensureOption(speaker, settings.speakerId, settings.speakerName);
+      mic.value = settings.micId || "";
+      speaker.value = settings.speakerId || "";
+    }
+
+    function setupAudio() {
+      document.getElementById("audioSection").classList.remove("hidden");
+      const iconType = document.getElementById("iconType");
+      const mic = document.getElementById("mic");
+      const speaker = document.getElementById("speaker");
+
+      iconType.value = settings.iconType || "";
+      iconType.addEventListener("change", function () {
+        settings.iconType = iconType.value;
+        saveSettings();
+      });
+
+      mic.addEventListener("change", function () {
+        settings.micId = mic.value;
+        settings.micName = mic.options[mic.selectedIndex].textContent;
+        saveSettings();
+      });
+      speaker.addEventListener("change", function () {
+        settings.speakerId = speaker.value;
+        settings.speakerName = speaker.options[speaker.selectedIndex].textContent;
+        saveSettings();
+      });
+
+      // Ask the plugin for the active Windows audio devices.
+      websocket.send(JSON.stringify({
+        event: "sendToPlugin",
+        action: actionUuid,
+        context: pluginContext,
+        payload: { request: "audioDevices" }
+      }));
+    }
+
+    function setupFocus() {
+      document.getElementById("focusSection").classList.remove("hidden");
+      const cb = document.getElementById("restoreFocus");
+      cb.checked = settings.restoreFocus !== false; // default: on
+      cb.addEventListener("change", function () {
+        settings.restoreFocus = cb.checked;
+        saveSettings();
+      });
+    }
 
     function connectElgatoStreamDeckSocket(inPort, inUUID, inRegisterEvent, inInfo, inActionInfo) {
       pluginContext = inUUID;
       try {
         const actionInfo = JSON.parse(inActionInfo);
+        actionUuid = actionInfo && actionInfo.action;
         settings = (actionInfo && actionInfo.payload && actionInfo.payload.settings) || {};
       } catch (e) {
         settings = {};
       }
 
       websocket = new WebSocket("ws://127.0.0.1:" + inPort);
+
+      websocket.onmessage = function (evt) {
+        try {
+          const data = JSON.parse(evt.data);
+          if (data.event === "sendToPropertyInspector" && data.payload &&
+              data.payload.kind === "audioDevices") {
+            populateDevices(data.payload);
+          }
+        } catch (e) { /* ignore */ }
+      };
+
       websocket.onopen = function () {
         websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inUUID }));
-
-        const cb = document.getElementById("restoreFocus");
-        cb.checked = settings.restoreFocus !== false; // default: on
-        cb.addEventListener("change", function () {
-          settings.restoreFocus = cb.checked;
-          websocket.send(JSON.stringify({
-            event: "setSettings",
-            context: pluginContext,
-            payload: settings
-          }));
-        });
+        if (isAudioAction()) setupAudio();
+        else setupFocus();
       };
     }
   </script>

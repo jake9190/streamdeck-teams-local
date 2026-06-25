@@ -101,6 +101,15 @@
       "Controllers": ["Keypad"],
       "SupportedInMultiActions": true,
       "States": [{ "Image": "imgs/actions/react-surprised/key", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.local.msteams-local.audio-device",
+      "Name": "Select Audio Device",
+      "Icon": "imgs/actions/audio-device/icon",
+      "Tooltip": "Switch the meeting microphone and/or speaker to a pre-selected device",
+      "Controllers": ["Keypad"],
+      "SupportedInMultiActions": true,
+      "States": [{ "Image": "imgs/actions/audio-device/key", "ShowTitle": false }]
     }
   ],
   "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
