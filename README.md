@@ -26,12 +26,14 @@ Highlights:
 - **Instant presses.** Everything runs in one long-lived process that talks to UI
   Automation in-process — there is no per-press `powershell.exe` spawn.
 - **No focus theft.** If Teams grabs the foreground while reacting, the plugin
-  hands focus back to the window you were using.
+  hands focus back to the window you were using. This is **toggleable per key** in the
+  Property Inspector ("Restore previous window after pressing").
 - **Optimistic icons.** Toggles update the key the moment you press, then reconcile
   with the real state on the next poll.
 - **Stable state.** A debounced poll preserves the last-known state across transient
   UI Automation hiccups, so the keys don't flicker "offline" during a meeting.
-- **Reaction flyout auto-closes** after the reaction is sent.
+- **Reaction flyout auto-closes** after the reaction is sent, and stays open across a
+  rapid burst of presses so you can spam reactions quickly.
 - **Modern flat icons** rendered as SVG at runtime, with state colours.
 
 ---
@@ -66,17 +68,21 @@ To build without deploying:
 
 ### Releases & packaging
 
-Produce distributable artifacts (a `.streamDeckPlugin` installer plus a portable `.zip`)
-in `dist/`:
+Produce distributable artifacts in `dist/` — in **both** flavors:
 
 ```powershell
 ./build/package.ps1
 ```
 
-The `.streamDeckPlugin` is built with the official [Elgato CLI](https://www.npmjs.com/package/@elgato/cli)
-(`npm i -g @elgato/cli`); a `.zip` fallback is always produced if the CLI isn't available.
-Pushing a `v*.*.*` tag runs the **Release** workflow, which packages the plugin and
-attaches the artifacts to a GitHub Release:
+| Artifact | Flavor | Needs .NET runtime? |
+| --- | --- | --- |
+| `com.local.msteams-local.streamDeckPlugin` / `.zip` | self-contained | No (runtime bundled) |
+| `com.local.msteams-local-runtime-required.streamDeckPlugin` / `.zip` | framework-dependent | Yes (smaller download) |
+
+The `.streamDeckPlugin` files are built with the official
+[Elgato CLI](https://www.npmjs.com/package/@elgato/cli) (`npm i -g @elgato/cli`); a `.zip`
+is always produced as a fallback. Pushing a `v*.*.*` tag runs the **Release** workflow,
+which packages the plugin and attaches the artifacts to a GitHub Release:
 
 ```powershell
 git tag v1.0.0

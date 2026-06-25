@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 
 namespace MsTeamsLocal;
 
@@ -41,12 +42,24 @@ public sealed class PluginHost
 
             case "keyDown":
                 if (e.Context is not null && ActionCatalog.Resolve(e.Action ?? "") is { } pressed)
-                    _ = HandleKeyDownAsync(e.Context, pressed);
+                    _ = HandleKeyDownAsync(e.Context, pressed, GetRestoreFocus(e.Settings));
                 break;
         }
     }
 
-    private async Task HandleKeyDownAsync(string context, ActionDescriptor d)
+    /// <summary>Per-button "restore previous window focus" setting; defaults to true when unset.</summary>
+    private static bool GetRestoreFocus(JsonElement? settings)
+    {
+        if (settings is JsonElement s && s.ValueKind == JsonValueKind.Object
+            && s.TryGetProperty("restoreFocus", out var v))
+        {
+            if (v.ValueKind == JsonValueKind.False) return false;
+            if (v.ValueKind == JsonValueKind.True) return true;
+        }
+        return true;
+    }
+
+    private async Task HandleKeyDownAsync(string context, ActionDescriptor d, bool restoreFocus)
     {
         var snap = _teams.Current;
         if (!snap.TeamsRunning || !snap.MeetingActive)
@@ -59,7 +72,7 @@ public sealed class PluginHost
         if (d.Kind is ActionKind.ToggleMute or ActionKind.ToggleCamera or ActionKind.RaiseHand)
             _teams.ApplyOptimistic(d);
 
-        bool ok = await Task.Run(() => _teams.Trigger(d));
+        bool ok = await Task.Run(() => _teams.Trigger(d, restoreFocus));
         if (!ok)
         {
             await _sd.ShowAlertAsync(context);

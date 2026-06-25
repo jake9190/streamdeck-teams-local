@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace MsTeamsLocal;
 
 /// <summary>A single inbound Stream Deck event we care about.</summary>
-public sealed record SdEvent(string Event, string? Action, string? Context);
+public sealed record SdEvent(string Event, string? Action, string? Context, JsonElement? Settings = null);
 
 /// <summary>
 /// Minimal Stream Deck plugin transport: connects to the Stream Deck software over
@@ -73,7 +73,17 @@ public sealed class StreamDeckConnection : IDisposable
             var evt = evtProp.GetString() ?? "";
             var action = root.TryGetProperty("action", out var a) ? a.GetString() : null;
             var context = root.TryGetProperty("context", out var c) ? c.GetString() : null;
-            EventReceived?.Invoke(new SdEvent(evt, action, context));
+
+            // Carry the action's settings (cloned so it survives doc disposal).
+            JsonElement? settings = null;
+            if (root.TryGetProperty("payload", out var payload)
+                && payload.ValueKind == JsonValueKind.Object
+                && payload.TryGetProperty("settings", out var s))
+            {
+                settings = s.Clone();
+            }
+
+            EventReceived?.Invoke(new SdEvent(evt, action, context, settings));
         }
         catch (Exception ex)
         {

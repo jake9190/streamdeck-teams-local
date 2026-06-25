@@ -9,6 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Self-contained publishing: the .NET runtime is bundled, so **end users no longer
   need the .NET Desktop Runtime installed**.
+- Per-key **"Restore previous window after pressing"** setting in the Property
+  Inspector (defaults to on), so focus restoration can be turned off per button.
+- `build/package.ps1` now produces **both** a self-contained
+  (`*.streamDeckPlugin`) and a framework-dependent (`*-runtime-required.streamDeckPlugin`)
+  artifact; `build.ps1` gained a `-SelfContained` switch.
 
 ### Changed
 - The Surprised reaction icon is now an open-mouthed "wow" face instead of X-eyes.

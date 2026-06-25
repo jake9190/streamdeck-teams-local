@@ -9,6 +9,7 @@
   "Category": "MS Teams Local",
   "CategoryIcon": "imgs/plugin/category-icon",
   "CodePath": "msteams-local.exe",
+  "PropertyInspectorPath": "ui/inspector.html",
   "SDKVersion": 2,
   "Actions": [
     {

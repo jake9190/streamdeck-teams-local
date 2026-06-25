@@ -1,8 +1,9 @@
 # Build outputs published into the plugin package.
-# Everything in the package folder is generated EXCEPT manifest.json and imgs/.
+# Everything in the package folder is generated EXCEPT manifest.json, imgs/ and ui/.
 com.local.msteams-local.sdPlugin/*
 !com.local.msteams-local.sdPlugin/manifest.json
 !com.local.msteams-local.sdPlugin/imgs/
+!com.local.msteams-local.sdPlugin/ui/
 
 # .NET build artifacts
 bin/

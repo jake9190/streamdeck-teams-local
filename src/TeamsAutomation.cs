@@ -282,7 +282,8 @@ public sealed class TeamsAutomation : IDisposable
     }
 
     /// <summary>Perform the control action in-process. Returns true on success.</summary>
-    public bool Trigger(ActionDescriptor d)
+    /// <param name="restoreFocus">When true, return focus to the prior window if Teams steals it.</param>
+    public bool Trigger(ActionDescriptor d, bool restoreFocus = true)
     {
         // Remember the window the user was on so we can hand focus back if Teams steals it.
         IntPtr previousForeground = GetForegroundWindow();
@@ -313,8 +314,7 @@ public sealed class TeamsAutomation : IDisposable
         }
         finally
         {
-            // Leaving the meeting intentionally changes focus; don't fight it.
-            if (d.Kind != ActionKind.Leave)
+            if (restoreFocus)
                 RestoreForeground(previousForeground);
         }
         return result;
