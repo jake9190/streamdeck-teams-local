@@ -464,7 +464,6 @@ public sealed class TeamsAutomation : IDisposable
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_NOOWNERZORDER = 0x0200;
-    private const uint SWP_ASYNCWINDOWPOS = 0x4000;
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -499,18 +498,21 @@ public sealed class TeamsAutomation : IDisposable
     /// </summary>
     private static void RestoreWindowOrder(IntPtr[] order, IntPtr foreground)
     {
-        if (foreground == IntPtr.Zero) return;
-        if (GetForegroundWindow() == foreground) return; // focus never changed -> nothing to do
+        if (order.Length == 0 && foreground == IntPtr.Zero) return;
 
-        try
+        // Reapply the captured stacking if the z-order actually changed. We compare the full
+        // order (not just the foreground window) because Teams can raise the meeting window
+        // above other windows even after focus has already returned to the user's window.
+        var current = CaptureWindowOrder();
+        if (order.Length > 0 && !SameOrder(order, current))
         {
-            if (order.Length > 0)
+            try
             {
                 var hdwp = BeginDeferWindowPos(order.Length);
                 if (hdwp != IntPtr.Zero)
                 {
-                    // Batch the moves so the whole stack is reordered in one pass (minimal flicker).
-                    const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+                    // Synchronous (no SWP_ASYNCWINDOWPOS) so the stack ends up in the exact order.
+                    const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
                     IntPtr insertAfter = HWND_TOP;
                     foreach (var hwnd in order) // top -> bottom
                     {
@@ -521,10 +523,19 @@ public sealed class TeamsAutomation : IDisposable
                     if (hdwp != IntPtr.Zero) EndDeferWindowPos(hdwp);
                 }
             }
+            catch (Exception ex) { Log.Error("RestoreWindowOrder failed", ex); }
         }
-        catch (Exception ex) { Log.Error("RestoreWindowOrder failed", ex); }
 
         // Re-activate the window that actually had focus (also restores keyboard input).
-        RestoreForeground(foreground);
+        if (foreground != IntPtr.Zero && GetForegroundWindow() != foreground)
+            RestoreForeground(foreground);
+    }
+
+    private static bool SameOrder(IntPtr[] a, IntPtr[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++)
+            if (a[i] != b[i]) return false;
+        return true;
     }
 }
