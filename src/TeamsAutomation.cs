@@ -464,18 +464,27 @@ public sealed class TeamsAutomation : IDisposable
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_NOOWNERZORDER = 0x0200;
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOPMOST = 0x0008;
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll")] private static extern IntPtr BeginDeferWindowPos(int nNumWindows);
     [DllImport("user32.dll")] private static extern IntPtr DeferWindowPos(
         IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] private static extern bool EndDeferWindowPos(IntPtr hWinPosInfo);
 
-    /// <summary>Snapshot the visible, non-minimized top-level windows in z-order (topmost first).</summary>
+    private static bool IsTopmost(IntPtr hWnd) => (GetWindowLong(hWnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+
+    /// <summary>
+    /// Snapshot visible, non-minimized, non-topmost top-level windows in z-order (topmost first).
+    /// Always-on-top windows are excluded: reordering through one would make every window after
+    /// it topmost too (a SetWindowPos rule), corrupting the desktop stacking.
+    /// </summary>
     private static IntPtr[] CaptureWindowOrder()
     {
         var list = new List<IntPtr>(64);
@@ -483,7 +492,7 @@ public sealed class TeamsAutomation : IDisposable
         {
             EnumWindows((h, _) =>
             {
-                if (IsWindowVisible(h) && !IsIconic(h)) list.Add(h);
+                if (IsWindowVisible(h) && !IsIconic(h) && !IsTopmost(h)) list.Add(h);
                 return true;
             }, IntPtr.Zero);
         }
@@ -514,8 +523,9 @@ public sealed class TeamsAutomation : IDisposable
                     // Synchronous (no SWP_ASYNCWINDOWPOS) so the stack ends up in the exact order.
                     const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
                     IntPtr insertAfter = HWND_TOP;
-                    foreach (var hwnd in order) // top -> bottom
+                    foreach (var hwnd in order) // top -> bottom (non-topmost windows only)
                     {
+                        if (IsTopmost(hwnd)) continue; // never anchor through an always-on-top window
                         hdwp = DeferWindowPos(hdwp, hwnd, insertAfter, 0, 0, 0, 0, flags);
                         if (hdwp == IntPtr.Zero) break;
                         insertAfter = hwnd;
