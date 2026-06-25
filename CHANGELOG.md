@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.1] - 2026-06-25
+
+### Added
+- Mute, camera and **Select Audio Device** now work on the Teams "Meeting join"
+  (pre-join) screen. The screen is detected structurally by its "Join now" button, so it
+  is recognised even when the window title shows only the meeting subject. The pre-join
+  mic/camera switches are toggled via focused UI Automation, and the device pickers are
+  opened, selected and closed with a real click (focus is taken only on this screen).
+
 ## [1.2.0] - 2026-06-25
 
 ### Added
