@@ -1,5 +1,7 @@
 # Stream Deck — MS Teams Local
 
+[![CI](https://github.com/jawelch/streamdeck-teams-local/actions/workflows/ci.yml/badge.svg)](https://github.com/jawelch/streamdeck-teams-local/actions/workflows/ci.yml)
+
 A fast, native **Elgato Stream Deck** plugin that controls the **new Microsoft Teams**
 desktop client directly through Windows UI Automation — no global hotkeys, no
 window focus stealing, and live state right on the keys.
@@ -62,6 +64,25 @@ To build without deploying:
 ./build/build.ps1
 ```
 
+### Releases & packaging
+
+Produce distributable artifacts (a `.streamDeckPlugin` installer plus a portable `.zip`)
+in `dist/`:
+
+```powershell
+./build/package.ps1
+```
+
+The `.streamDeckPlugin` is built with the official [Elgato CLI](https://www.npmjs.com/package/@elgato/cli)
+(`npm i -g @elgato/cli`); a `.zip` fallback is always produced if the CLI isn't available.
+Pushing a `v*.*.*` tag runs the **Release** workflow, which packages the plugin and
+attaches the artifacts to a GitHub Release:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
 ---
 
 ## How it works
@@ -107,7 +128,6 @@ streamdeck-teams-local/
    ├─ architecture.md
    └─ development.md
 ```
-
 ---
 
 ## Development

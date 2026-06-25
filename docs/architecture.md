@@ -101,6 +101,9 @@ Reaction flyout items (support `InvokePattern`):
 
 ## Icons
 
-Icons are rendered as inline SVG (rounded-rect background + a Phosphor glyph) and sent
-via `setImage` as a base64 data URI. The same renderer produces the static manifest
-icons through `IconEmitter`, so the idle and live icons stay visually consistent.
+Live key icons are rendered as inline SVG (rounded-rect background + a Phosphor glyph)
+and sent via `setImage` as a base64 data URI. The static manifest icons (the action
+list icons, default key images, and category icon) must be PNG for the Elgato packaging
+tool, so `IconEmitter` rasterizes the **same** `IconRenderer.GetVisual` output with WPF
+(`DrawingVisual` / `RenderTargetBitmap`) at the standard Stream Deck sizes. Sharing
+`GetVisual` keeps the live and static icons visually identical.

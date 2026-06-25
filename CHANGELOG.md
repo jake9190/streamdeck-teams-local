@@ -19,3 +19,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Focus restoration: returns focus to the previously active window if Teams steals it.
 - Cached UI Automation control elements for faster polls and presses.
 - `build.ps1` / `deploy.ps1` tooling and project documentation.
+- GitHub Actions **CI** workflow (build + artifact on every push) and **Release**
+  workflow that packages a `.streamDeckPlugin` on `v*.*.*` tags.
+- `build/package.ps1` to produce `.streamDeckPlugin` + `.zip` distributables.

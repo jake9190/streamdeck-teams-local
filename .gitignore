@@ -18,6 +18,9 @@ artifacts/
 dist/
 *.streamDeckPlugin
 
+# Node (Elgato CLI)
+node_modules/
+
 # IDE / OS
 .vs/
 .vscode/
