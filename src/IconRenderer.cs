@@ -39,9 +39,9 @@ public static class IconRenderer
     /// <summary>Decide background colour, glyph colour, glyph path and badge for an action+state.</summary>
     public static IconVisual GetVisual(ActionDescriptor d, TeamsSnapshot s, string? audioIconType = null)
     {
-        // Disabled look when there's no meeting to act on (or Teams isn't running).
+        // Disabled look when the action can't act (no meeting, or pre-join for a meeting-only key).
         // Reactions still show their own glyph (just dimmed) so each key stays identifiable.
-        if (!s.TeamsRunning || !s.MeetingActive)
+        if (!ActionCatalog.IsActionable(d, s))
         {
             string disabledGlyph = d.Kind switch
             {

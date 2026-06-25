@@ -9,6 +9,10 @@ public sealed record TeamsSnapshot
     public bool TeamsRunning { get; init; }
     public bool MeetingActive { get; init; }
 
+    /// <summary>True when Teams is showing the pre-join ("Meeting join…") screen, where mute,
+    /// camera and audio-device selection work but the meeting itself hasn't started.</summary>
+    public bool PreJoin { get; init; }
+
     /// <summary>True when the microphone is currently muted.</summary>
     public bool Muted { get; init; }
 

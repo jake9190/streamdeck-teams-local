@@ -115,7 +115,7 @@ public sealed class PluginHost
     private async Task HandleKeyDownAsync(string context, ActionDescriptor d, JsonElement? settings)
     {
         var snap = _teams.Current;
-        if (!snap.TeamsRunning || !snap.MeetingActive)
+        if (!ActionCatalog.IsActionable(d, snap))
         {
             await _sd.ShowAlertAsync(context);
             return;

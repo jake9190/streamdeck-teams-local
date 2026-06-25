@@ -23,6 +23,7 @@ public sealed class TeamsAutomation : IDisposable
 
     private AutomationElement? _meetingWindow;
     private AutomationElement? _selfVideo; // local participant's video tile (for hand-raised reads)
+    private bool _windowIsPreJoin;         // whether the resolved window is the pre-join screen
     private int _missCount;
 
     // Cache of toolbar control elements for the current meeting window. The element
@@ -33,6 +34,7 @@ public sealed class TeamsAutomation : IDisposable
     // Last-known raw control state (preserved across transient read failures).
     private bool _teamsRunning;
     private bool _meetingActive;
+    private bool _preJoin;
     private bool _muted;
     private bool _cameraOff;
     private bool _handRaised;
@@ -92,7 +94,7 @@ public sealed class TeamsAutomation : IDisposable
     {
         bool teamsRunning = IsTeamsRunning();
 
-        bool meetingActive;
+        bool meetingActive, preJoin;
         bool muted, cameraOff, handRaised, sharing;
 
         lock (_uia)
@@ -103,20 +105,34 @@ public sealed class TeamsAutomation : IDisposable
                 // No meeting found this cycle. Debounce before flipping to inactive
                 // so a single transient UIA hiccup never knocks the icons offline.
                 _missCount++;
-                meetingActive = _meetingActive && _missCount < MissThreshold;
+                bool live = _missCount < MissThreshold;
+                meetingActive = _meetingActive && live;
+                preJoin = _preJoin && live;
                 muted = _muted; cameraOff = _cameraOff; handRaised = _handRaised; sharing = _sharing;
             }
             else
             {
                 _missCount = 0;
-                meetingActive = true;
-                // Read each control; keep the previous value if a read fails/returns unknown.
-                muted = ReadBool(window, "microphone-button", "unmute") ?? _muted;
-                cameraOff = ReadBool(window, "video-button", "camera on") ?? _cameraOff;
-                sharing = ReadBool(window, "share-button", "stop") ?? _sharing;
-                // The raise-hand button Name never changes, so hand state is read from the
-                // self-video tile's Name (it gains "Hand raised" when up).
-                handRaised = ReadHandRaised(window) ?? _handRaised;
+                preJoin = _windowIsPreJoin;
+                meetingActive = !preJoin;
+                if (preJoin)
+                {
+                    // Pre-join mic/camera buttons have dynamic ids, so locate them by Name. The
+                    // state keywords ("unmute" / "camera on") match the in-meeting wording.
+                    muted = ReadNamedBool(window, "mute mic", "unmute") ?? _muted;
+                    cameraOff = ReadNamedBool(window, "turn camera", "camera on") ?? _cameraOff;
+                    handRaised = false;
+                    sharing = false;
+                }
+                else
+                {
+                    muted = ReadBool(window, "microphone-button", "unmute") ?? _muted;
+                    cameraOff = ReadBool(window, "video-button", "camera on") ?? _cameraOff;
+                    sharing = ReadBool(window, "share-button", "stop") ?? _sharing;
+                    // The raise-hand button Name never changes, so hand state is read from the
+                    // self-video tile's Name (it gains "Hand raised" when up).
+                    handRaised = ReadHandRaised(window) ?? _handRaised;
+                }
             }
         }
 
@@ -125,6 +141,7 @@ public sealed class TeamsAutomation : IDisposable
         {
             _teamsRunning = teamsRunning;
             _meetingActive = meetingActive;
+            _preJoin = preJoin;
 
             // Apply real reads unless an optimistic hold is still active for that control.
             if (now >= _muteHoldUntil) _muted = muted;
@@ -147,6 +164,7 @@ public sealed class TeamsAutomation : IDisposable
                 Initialized = _initialized,
                 TeamsRunning = _teamsRunning,
                 MeetingActive = _meetingActive,
+                PreJoin = _preJoin,
                 Muted = _muted,
                 CameraOff = _cameraOff,
                 HandRaised = _handRaised,
@@ -171,7 +189,17 @@ public sealed class TeamsAutomation : IDisposable
         {
             try
             {
-                if (GetControl(_meetingWindow, "hangup-button") is not null) return _meetingWindow;
+                if (_windowIsPreJoin)
+                {
+                    // Revalidate by the structural signal (the "Join now" button), since the
+                    // pre-join window title isn't always "Meeting join…".
+                    if (IsPreJoinWindow(_meetingWindow))
+                        return _meetingWindow;
+                }
+                else if (GetControl(_meetingWindow, "hangup-button") is not null)
+                {
+                    return _meetingWindow;
+                }
             }
             catch { /* window gone */ }
             _meetingWindow = null;
@@ -200,7 +228,7 @@ public sealed class TeamsAutomation : IDisposable
         return found;
     }
 
-    private static AutomationElement? FindMeetingWindow()
+    private AutomationElement? FindMeetingWindow()
     {
         var teamsPids = GetTeamsPids();
         if (teamsPids.Count == 0) return null;
@@ -210,17 +238,54 @@ public sealed class TeamsAutomation : IDisposable
             TreeScope.Children,
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window));
 
+        AutomationElement? preJoin = null;
         foreach (AutomationElement window in windows)
         {
             try
             {
                 if (!teamsPids.Contains(window.Current.ProcessId)) continue;
-                var hangup = FindIn(window, "hangup-button");
-                if (hangup is not null) return window;
+                // An active meeting (has the hangup button) always wins.
+                if (FindIn(window, "hangup-button") is not null)
+                {
+                    _windowIsPreJoin = false;
+                    return window;
+                }
+                // Otherwise remember a pre-join window. The title is usually "Meeting join…",
+                // but sometimes it's just the meeting subject, so detect the screen structurally
+                // by its "Join now" button (prejoin-join-button).
+                if (preJoin is null && IsPreJoinWindow(window))
+                {
+                    preJoin = window;
+                }
             }
             catch { /* skip windows that vanish mid-enumeration */ }
         }
+
+        if (preJoin is not null)
+        {
+            _windowIsPreJoin = true;
+            return preJoin;
+        }
         return null;
+    }
+
+    /// <summary>
+    /// True if <paramref name="window"/> is the Teams pre-join ("Meeting join") screen. Detected by
+    /// the "Join now" button (prejoin-join-button), which is present regardless of the window title.
+    /// </summary>
+    private static bool IsPreJoinWindow(AutomationElement window)
+    {
+        try
+        {
+            if (FindIn(window, "prejoin-join-button") is not null) return true;
+        }
+        catch { }
+        // Fallback to the conventional title for any UI variant lacking that AutomationId.
+        try
+        {
+            return (window.Current.Name ?? "").StartsWith("Meeting join", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     private static AutomationElement? FindIn(AutomationElement root, string automationId)
@@ -298,6 +363,92 @@ public sealed class TeamsAutomation : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// Finds a descendant control whose Name contains <paramref name="nameSubstring"/> (used for the
+    /// pre-join screen, whose mic/camera/device controls have dynamic AutomationIds but stable Names).
+    /// The pre-join mic/camera controls are toggle switches (CheckBox), not Buttons, so several
+    /// interactive control types are searched.
+    /// </summary>
+    private static AutomationElement? FindButtonByName(AutomationElement window, string nameSubstring)
+    {
+        try
+        {
+            var scan = window.FindAll(TreeScope.Descendants,
+                new OrCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.CheckBox),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem)));
+            foreach (AutomationElement b in scan)
+            {
+                try
+                {
+                    var n = b.Current.Name;
+                    if (!string.IsNullOrEmpty(n) && n.IndexOf(nameSubstring, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return b;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>Reads a named button's state keyword (pre-join mute/camera), or null if not found.</summary>
+    private static bool? ReadNamedBool(AutomationElement window, string locatorSubstring, string keyword)
+    {
+        try
+        {
+            var el = FindButtonByName(window, locatorSubstring);
+            var name = el?.Current.Name;
+            if (string.IsNullOrEmpty(name)) return null;
+            return name.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Actuates a control located by Name (pre-join screen). These controls are web "switch"
+    /// elements whose MSAA default action is a no-op, so we set focus and use the Toggle/Invoke
+    /// pattern (this takes focus, which is acceptable on the pre-join screen).
+    /// </summary>
+    private bool ActuateNamed(AutomationElement window, IntPtr hwnd, string nameSubstring)
+    {
+        var el = FindButtonByName(window, nameSubstring);
+        if (el is null) { Log.Warn($"control not found by name: {nameSubstring}"); return false; }
+        try
+        {
+            Log.Info($"actuate named '{nameSubstring}' -> name='{el.Current.Name}' aid='{el.Current.AutomationId}' type={el.Current.ControlType.ProgrammaticName}");
+            try { el.SetFocus(); } catch { }
+            if (el.TryGetCurrentPattern(TogglePattern.Pattern, out var tog))
+            {
+                ((TogglePattern)tog).Toggle();
+                Log.Info($"  actuated '{nameSubstring}' via Toggle");
+                return true;
+            }
+            if (el.TryGetCurrentPattern(InvokePattern.Pattern, out var inv))
+            {
+                ((InvokePattern)inv).Invoke();
+                Log.Info($"  actuated '{nameSubstring}' via Invoke");
+                return true;
+            }
+            // Last resort: focus-free MSAA default action.
+            var aid = el.Current.AutomationId;
+            if (!string.IsNullOrEmpty(aid) && hwnd != IntPtr.Zero)
+            {
+                bool com = ComActuate(hwnd, aid);
+                Log.Info($"  actuated '{nameSubstring}' via Com={com}");
+                return com;
+            }
+            // No actionable pattern and no id (e.g. the pre-join "open speaker/microphone options"
+            // buttons): fall back to a real mouse click at the control (focus is acceptable here).
+            bool clicked = ClickElement(el);
+            Log.Info($"  actuated '{nameSubstring}' via Click={clicked}");
+            return clicked;
+        }
+        catch (Exception ex) { Log.Error($"actuate named {nameSubstring} failed", ex); return false; }
+    }
+
+
     // ---- Process detection --------------------------------------------------
 
     private static bool IsTeamsRunning() => GetTeamsPids().Count > 0;
@@ -343,6 +494,11 @@ public sealed class TeamsAutomation : IDisposable
                 var window = ResolveMeetingWindow(IsTeamsRunning());
                 if (window is null) return false;
 
+                // The pre-join screen has no combined audio panel: it has separate "open microphone
+                // options" / "open speaker options" buttons that each open a device list.
+                if (_windowIsPreJoin)
+                    return SetAudioDevicesPreJoin(window, (IntPtr)window.Current.NativeWindowHandle, micDeviceId, speakerDeviceId);
+
                 var configure = FindIn(window, "audio-button-configure");
                 if (configure is null) { Log.Warn("audio-button-configure not found"); return false; }
 
@@ -376,21 +532,67 @@ public sealed class TeamsAutomation : IDisposable
         }
     }
 
+    /// <summary>
+    /// On the pre-join screen, opens the separate microphone/speaker option menus and selects the
+    /// configured device in each (the device list items carry the same AutomationId as in-meeting).
+    /// Each picker is a toggle panel that stays open after selection, so it is closed by re-clicking
+    /// its button.
+    /// </summary>
+    private bool SetAudioDevicesPreJoin(AutomationElement window, IntPtr hwnd, string? micId, string? speakerId)
+    {
+        bool any = false;
+        if (!string.IsNullOrEmpty(speakerId))
+            any |= SelectPreJoinDevice(window, hwnd, "open speaker options", speakerId!);
+        if (!string.IsNullOrEmpty(micId))
+            any |= SelectPreJoinDevice(window, hwnd, "open microphone options", micId!);
+        return any;
+    }
+
+    /// <summary>Opens a pre-join device picker, selects the configured device, then closes the picker.</summary>
+    private bool SelectPreJoinDevice(AutomationElement window, IntPtr hwnd, string buttonName, string deviceId)
+    {
+        if (!ActuateNamed(window, hwnd, buttonName)) return false;
+        Log.Info($"prejoin select '{buttonName}' id={deviceId}");
+        bool selected = SelectAudioDevice(window, deviceId);
+        // The picker is a toggle panel that remains open after a selection; re-click to close it.
+        Thread.Sleep(80);
+        ActuateNamed(window, hwnd, buttonName);
+        return selected;
+    }
+
     /// <summary>Selects the audio device list item whose AutomationId matches <paramref name="deviceId"/>.</summary>
     private bool SelectAudioDevice(AutomationElement window, string deviceId)
     {
-        // The panel renders asynchronously after opening; poll briefly for the item.
+        // The panel renders asynchronously after opening; poll briefly for the item. The pre-join
+        // device picker opens as a popup menu rooted at the desktop (outside the window subtree),
+        // so fall back to searching from the root element.
+        var idCond = new PropertyCondition(AutomationElement.AutomationIdProperty, deviceId);
         AutomationElement? item = null;
         for (int i = 0; i < 30 && item is null; i++)
         {
             try { item = FindIn(window, deviceId); }
             catch { }
+            if (item is null)
+            {
+                try { item = AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond); }
+                catch { }
+            }
             if (item is null) Thread.Sleep(20);
         }
-        if (item is null) { Log.Warn($"audio device not found in panel: {deviceId}"); return false; }
+        if (item is null)
+        {
+            Log.Warn($"audio device not found in panel: {deviceId}");
+            DumpMenuItems();
+            return false;
+        }
 
         try
         {
+            Log.Info($"select audio device -> name='{item.Current.Name}' type={item.Current.ControlType.ProgrammaticName}");
+            // A real click selects the item AND dismisses the picker flyout (the programmatic
+            // Select/Invoke patterns leave the flyout open). Fall back to the patterns if the item
+            // has no on-screen point.
+            if (ClickElement(item)) return true;
             if (item.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var sip))
             {
                 ((SelectionItemPattern)sip).Select();
@@ -399,6 +601,28 @@ public sealed class TeamsAutomation : IDisposable
             return Invoke(item);
         }
         catch (Exception ex) { Log.Error($"select audio device failed: {deviceId}", ex); return false; }
+    }
+
+    /// <summary>Logs every MenuItem/ListItem/Button currently visible under the desktop (used to
+    /// diagnose which control identifies the pre-join device picker entries).</summary>
+    private static void DumpMenuItems()
+    {
+        try
+        {
+            var scan = AutomationElement.RootElement.FindAll(TreeScope.Descendants,
+                new OrCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton)));
+            Log.Info($"--- device picker dump: {scan.Count} item(s) ---");
+            foreach (AutomationElement e in scan)
+            {
+                try { Log.Info($"  item aid='{e.Current.AutomationId}' name='{e.Current.Name}' type={e.Current.ControlType.ProgrammaticName}"); }
+                catch { }
+            }
+            Log.Info("--- device picker dump end ---");
+        }
+        catch (Exception ex) { Log.Error("device picker dump failed", ex); }
     }
 
     // ---- Actions ------------------------------------------------------------
@@ -440,10 +664,19 @@ public sealed class TeamsAutomation : IDisposable
                 var window = ResolveMeetingWindow(IsTeamsRunning());
                 if (window is null) return false;
 
+                // On the pre-join screen the mic/camera buttons have dynamic ids, so locate them by
+                // Name; everything else uses the stable in-meeting AutomationIds.
+                bool preJoin = _windowIsPreJoin;
+                IntPtr hwnd = (IntPtr)window.Current.NativeWindowHandle;
+
                 result = d.Kind switch
                 {
-                    ActionKind.ToggleMute => InvokeControl(window, "microphone-button"),
-                    ActionKind.ToggleCamera => InvokeControl(window, "video-button"),
+                    ActionKind.ToggleMute => preJoin
+                        ? ActuateNamed(window, hwnd, "mute mic")
+                        : InvokeControl(window, "microphone-button"),
+                    ActionKind.ToggleCamera => preJoin
+                        ? ActuateNamed(window, hwnd, "turn camera")
+                        : InvokeControl(window, "video-button"),
                     ActionKind.RaiseHand => InvokeControl(window, "raisehands-button"),
                     ActionKind.ShareScreen => InvokeControl(window, "share-button"),
                     ActionKind.Leave => InvokeControl(window, "hangup-button"),
@@ -586,6 +819,44 @@ public sealed class TeamsAutomation : IDisposable
 
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] private static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X; public int Y; }
+
+    /// <summary>
+    /// Performs a real left-click at the element's centre (used for pre-join controls that expose
+    /// no actionable UIA pattern). The cursor is restored afterwards. Returns false if no on-screen
+    /// point is available.
+    /// </summary>
+    private static bool ClickElement(AutomationElement el)
+    {
+        try
+        {
+            System.Windows.Point pt;
+            try { pt = el.GetClickablePoint(); }
+            catch
+            {
+                var r = el.Current.BoundingRectangle;
+                if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) return false;
+                pt = new System.Windows.Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
+            }
+
+            GetCursorPos(out var prev);
+            SetCursorPos((int)pt.X, (int)pt.Y);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+            SetCursorPos(prev.X, prev.Y);
+            return true;
+        }
+        catch (Exception ex) { Log.Error("click element failed", ex); return false; }
+    }
 
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);

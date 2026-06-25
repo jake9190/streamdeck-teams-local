@@ -47,6 +47,20 @@ public static class ActionCatalog
     /// <summary>Every action requires an active meeting to be pressable.</summary>
     public static bool RequiresMeeting(ActionDescriptor d) => true;
 
+    /// <summary>
+    /// Whether an action can act given the current state. Mute, camera and audio-device selection
+    /// also work on the Teams pre-join ("Meeting join…") screen; everything else needs an active
+    /// meeting. Shared by the press gate and the icon's enabled/dimmed look.
+    /// </summary>
+    public static bool IsActionable(ActionDescriptor d, TeamsSnapshot s)
+    {
+        if (!s.TeamsRunning) return false;
+        if (s.MeetingActive) return true;
+        if (s.PreJoin)
+            return d.Kind is ActionKind.ToggleMute or ActionKind.ToggleCamera or ActionKind.AudioDevice;
+        return false;
+    }
+
     /// <summary>Resolve a descriptor from a full Stream Deck action UUID (or its short id).</summary>
     public static ActionDescriptor? Resolve(string actionUuid)
     {
