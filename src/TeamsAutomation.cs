@@ -281,7 +281,10 @@ public sealed class TeamsAutomation : IDisposable
     /// <param name="restoreFocus">When true, restore the window stacking if Teams steals focus.</param>
     public bool Trigger(ActionDescriptor d, bool restoreFocus = true)
     {
-        // Snapshot the window stacking so we can put it back exactly if Teams jumps forward.
+        // Snapshot the active window AND the window stacking so we can put both back if
+        // Teams jumps forward. The foreground window is tracked separately because the
+        // topmost z-order window may be an always-on-top widget, not what the user was using.
+        IntPtr previousForeground = restoreFocus ? GetForegroundWindow() : IntPtr.Zero;
         IntPtr[] windowOrder = restoreFocus ? CaptureWindowOrder() : Array.Empty<IntPtr>();
         bool result = false;
         try
@@ -311,7 +314,7 @@ public sealed class TeamsAutomation : IDisposable
         finally
         {
             if (restoreFocus)
-                RestoreWindowOrder(windowOrder);
+                RestoreWindowOrder(windowOrder, previousForeground);
         }
         return result;
     }
@@ -491,33 +494,37 @@ public sealed class TeamsAutomation : IDisposable
 
     /// <summary>
     /// Reapply a previously captured z-order so the exact window stacking from before the
-    /// action is restored — not just the foreground window. No-op when nothing changed.
+    /// action is restored, then re-activate the window that was actually focused. No-op when
+    /// the foreground never changed.
     /// </summary>
-    private static void RestoreWindowOrder(IntPtr[] order)
+    private static void RestoreWindowOrder(IntPtr[] order, IntPtr foreground)
     {
-        if (order.Length == 0) return;
-        if (GetForegroundWindow() == order[0]) return; // foreground never changed -> nothing to do
+        if (foreground == IntPtr.Zero) return;
+        if (GetForegroundWindow() == foreground) return; // focus never changed -> nothing to do
 
         try
         {
-            var hdwp = BeginDeferWindowPos(order.Length);
-            if (hdwp != IntPtr.Zero)
+            if (order.Length > 0)
             {
-                // Batch the moves so the whole stack is reordered in one pass (minimal flicker).
-                const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
-                IntPtr insertAfter = HWND_TOP;
-                foreach (var hwnd in order) // top -> bottom
+                var hdwp = BeginDeferWindowPos(order.Length);
+                if (hdwp != IntPtr.Zero)
                 {
-                    hdwp = DeferWindowPos(hdwp, hwnd, insertAfter, 0, 0, 0, 0, flags);
-                    if (hdwp == IntPtr.Zero) break;
-                    insertAfter = hwnd;
+                    // Batch the moves so the whole stack is reordered in one pass (minimal flicker).
+                    const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+                    IntPtr insertAfter = HWND_TOP;
+                    foreach (var hwnd in order) // top -> bottom
+                    {
+                        hdwp = DeferWindowPos(hdwp, hwnd, insertAfter, 0, 0, 0, 0, flags);
+                        if (hdwp == IntPtr.Zero) break;
+                        insertAfter = hwnd;
+                    }
+                    if (hdwp != IntPtr.Zero) EndDeferWindowPos(hdwp);
                 }
-                if (hdwp != IntPtr.Zero) EndDeferWindowPos(hdwp);
             }
         }
         catch (Exception ex) { Log.Error("RestoreWindowOrder failed", ex); }
 
-        // Re-activate the window that was on top (also restores keyboard focus).
-        RestoreForeground(order[0]);
+        // Re-activate the window that actually had focus (also restores keyboard input).
+        RestoreForeground(foreground);
     }
 }
