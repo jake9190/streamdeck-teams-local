@@ -47,6 +47,14 @@ internal interface IUIAutomation
     object CreatePropertyCondition(                       // slot 21
         int propertyId,
         [MarshalAs(UnmanagedType.Struct)] object value);
+    void _unused22();  // CreatePropertyConditionEx
+    void _unused23();  // CreateAndCondition
+    void _unused24();  // CreateAndConditionFromArray
+    void _unused25();  // CreateAndConditionFromNativeArray
+    [return: MarshalAs(UnmanagedType.IUnknown)]
+    object CreateOrCondition(                             // slot 26
+        [MarshalAs(UnmanagedType.IUnknown)] object condition1,
+        [MarshalAs(UnmanagedType.IUnknown)] object condition2);
 }
 
 [ComImport]
@@ -62,7 +70,8 @@ internal interface IUIAutomationElement
     void _unused05();  // FindFirstBuildCache
     void _unused06();  // FindAllBuildCache
     void _unused07();  // BuildUpdatedCache
-    void _unused08();  // GetCurrentPropertyValue
+    [return: MarshalAs(UnmanagedType.Struct)]
+    object? GetCurrentPropertyValue(int propertyId);     // slot 8
     void _unused09();  // GetCurrentPropertyValueEx
     void _unused10();  // GetCachedPropertyValue
     void _unused11();  // GetCachedPropertyValueEx

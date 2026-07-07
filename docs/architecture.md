@@ -32,16 +32,33 @@ state flicker, and icon-update lag.
 
 ## State polling
 
-A background thread polls every ~600 ms:
+A background thread polls Teams' state on an **adaptive cadence**: ~600 ms while a
+meeting or the pre-join screen is live (so mute/camera/hand/share changes reflect
+promptly), and ~2.5 s when idle (Teams running, no meeting — the common case), so the
+process barely uses CPU and the meeting-window probe runs far less often.
 
 1. Determine whether Teams is running (process check for `ms-teams` / `msteams`).
 2. Resolve the **meeting window**: a top-level window owned by a Teams process that
-   contains a `hangup-button`. The resolved window is cached.
+   contains a `hangup-button` (in-meeting) or a `prejoin-join-button` (pre-join). The
+   resolved window is cached and re-validated cheaply on subsequent polls.
 3. Read control state from the cached window by inspecting each toolbar button's
    `Name` (see the keyword table below). Each toolbar element is cached so a poll
    does not re-walk the UIA tree.
 4. Publish an immutable `TeamsSnapshot`; the host repaints any keys whose image
    would change.
+
+### Detection uses the COM UIA client, not the managed wrapper
+
+The idle poll must search the (large, Chromium-based) Teams window for a meeting
+toolbar that usually isn't there. The managed `System.Windows.Automation` client leaks
+native memory under continuous descendant searches, so meeting-window **detection** uses
+the COM `IUIAutomation` client directly: top-level windows are enumerated with cheap
+Win32 calls (`EnumWindows`), each is probed with a **single** descendant search
+(`hangup-button` OR `prejoin-join-button`), and every COM element is freed with
+`Marshal.ReleaseComObject`. A managed `AutomationElement` is materialized (via
+`AutomationElement.FromHandle`) only once a real meeting window is found, keeping the
+leaky managed client off the always-running idle path.
+
 
 ### Robustness
 

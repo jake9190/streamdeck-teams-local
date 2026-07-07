@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Automation;
 
@@ -12,17 +11,34 @@ namespace MsTeamsLocal;
 /// </summary>
 public sealed class TeamsAutomation : IDisposable
 {
-    private const int PollIntervalMs = 600;
+    // Poll cadence. While a meeting (or the pre-join screen) is live we poll quickly so state
+    // changes (mute/camera/hand/share) reflect promptly. When idle we back off substantially:
+    // the idle case is the norm (Teams running, no meeting), and each idle poll must probe the
+    // Teams window for a meeting toolbar, which is the expensive part.
+    private const int ActivePollIntervalMs = 600;
+    private const int IdlePollIntervalMs = 2500;
     private const int MissThreshold = 3;        // consecutive misses before declaring "no meeting"
     private const int OptimisticHoldMs = 1500;  // honor an optimistic toggle this long
+    private const int SelfTileRefindCooldownMs = 3000; // min gap between full self-video-tile searches after a miss
+    private const int PressLockTimeoutMs = 3500;     // abandon a press if the UIA lock isn't free within this
+    private const int ReactionSearchBudgetMs = 1500; // max wall-clock spent hunting for a reaction flyout item
+    private const int RaiseSettlePollMs = 60;        // poll interval while waiting for Teams' async raise to settle
+    private const int RaiseSettleStable = 3;         // consecutive stable polls that mean Teams stopped raising
+    private const int RaiseSettleMaxMs = 1200;       // give up waiting for the raise/settle after this
 
     private static readonly string[] TeamsProcessNames = { "ms-teams", "msteams", "Teams" };
+
+    // Opt-in verbose UIA diagnostics (e.g. dumping the device-picker tree). Off by default because
+    // those dumps do a full desktop descendant walk; enable with MSTEAMS_LOCAL_VERBOSE=1.
+    private static readonly bool VerboseUia =
+        Environment.GetEnvironmentVariable("MSTEAMS_LOCAL_VERBOSE") is "1" or "true";
 
     private readonly object _uia = new();        // serialize UIA work across poll + actions
     private readonly object _stateGate = new();
 
     private AutomationElement? _meetingWindow;
     private AutomationElement? _selfVideo; // local participant's video tile (for hand-raised reads)
+    private long _selfVideoRetryAfter;     // tick before which we skip re-walking for a missing self tile
     private bool _windowIsPreJoin;         // whether the resolved window is the pre-join screen
     private int _missCount;
 
@@ -80,7 +96,12 @@ public sealed class TeamsAutomation : IDisposable
         {
             try { PollOnce(); }
             catch (Exception ex) { Log.Error("poll failed", ex); }
-            Thread.Sleep(PollIntervalMs);
+
+            // Fast cadence only while something meeting-like is live; otherwise back off so the
+            // idle process barely uses CPU and the UIA probes happen far less often.
+            var s = Current;
+            int delay = (s.MeetingActive || s.PreJoin) ? ActivePollIntervalMs : IdlePollIntervalMs;
+            Thread.Sleep(delay);
         }
     }
 
@@ -92,14 +113,15 @@ public sealed class TeamsAutomation : IDisposable
 
     private void PollOnce()
     {
-        bool teamsRunning = IsTeamsRunning();
+        var teamsPids = GetTeamsPids();
+        bool teamsRunning = teamsPids.Count > 0;
 
         bool meetingActive, preJoin;
         bool muted, cameraOff, handRaised, sharing;
 
         lock (_uia)
         {
-            var window = ResolveMeetingWindow(teamsRunning);
+            var window = ResolveMeetingWindow(teamsPids);
             if (window is null)
             {
                 // No meeting found this cycle. Debounce before flipping to inactive
@@ -180,9 +202,9 @@ public sealed class TeamsAutomation : IDisposable
 
     // ---- Meeting window resolution -----------------------------------------
 
-    private AutomationElement? ResolveMeetingWindow(bool teamsRunning)
+    private AutomationElement? ResolveMeetingWindow(HashSet<int> teamsPids)
     {
-        if (!teamsRunning) { _meetingWindow = null; return null; }
+        if (teamsPids.Count == 0) { _meetingWindow = null; return null; }
 
         // Revalidate the cached window cheaply (scoped search inside it).
         if (_meetingWindow is not null)
@@ -206,7 +228,7 @@ public sealed class TeamsAutomation : IDisposable
             _controls.Clear();
         }
 
-        var found = FindMeetingWindow();
+        var found = FindMeetingWindow(teamsPids);
         if (found is not null)
         {
             _meetingWindow = found;
@@ -228,45 +250,118 @@ public sealed class TeamsAutomation : IDisposable
         return found;
     }
 
-    private AutomationElement? FindMeetingWindow()
+    private AutomationElement? FindMeetingWindow(HashSet<int> teamsPids)
     {
-        var teamsPids = GetTeamsPids();
         if (teamsPids.Count == 0) return null;
 
-        AutomationElement.RootElement.GetType(); // touch to ensure UIA init
-        var windows = AutomationElement.RootElement.FindAll(
-            TreeScope.Children,
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window));
+        var (hwnd, preJoin) = FindMeetingHwndViaCom(teamsPids);
+        if (hwnd == IntPtr.Zero) return null;
 
-        AutomationElement? preJoin = null;
-        foreach (AutomationElement window in windows)
+        _windowIsPreJoin = preJoin;
+        try { return AutomationElement.FromHandle(hwnd); }
+        catch (Exception ex) { Log.Error("FromHandle failed for meeting window", ex); return null; }
+    }
+
+    /// <summary>
+    /// Locates the meeting (or pre-join) window handle using the COM UI Automation client, releasing
+    /// every transient element it touches. This is the hot path: it runs on every idle poll to look
+    /// for a meeting that usually isn't there. The managed <c>System.Windows.Automation</c> client
+    /// leaks native memory under continuous descendant searches, so this detection deliberately uses
+    /// the COM client (whose elements we free with <see cref="Marshal.ReleaseComObject"/>) and only
+    /// materializes a managed <see cref="AutomationElement"/> once an actual meeting window is found.
+    /// Window enumeration is done with cheap Win32 calls (no UIA) and each candidate is probed with a
+    /// single descendant search for either the in-meeting hangup button or the pre-join "Join now"
+    /// button.
+    /// </summary>
+    private (IntPtr hwnd, bool preJoin) FindMeetingHwndViaCom(HashSet<int> teamsPids)
+    {
+        var hwnds = GetTopLevelWindows(teamsPids);
+        if (hwnds.Count == 0) return (IntPtr.Zero, false);
+
+        var automation = ComAutomation;
+        object? hangupCond = null, prejoinCond = null, orCond = null;
+        IntPtr preJoinHwnd = IntPtr.Zero;
+        try
         {
-            try
+            hangupCond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, "hangup-button");
+            prejoinCond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, "prejoin-join-button");
+            orCond = automation.CreateOrCondition(hangupCond, prejoinCond);
+
+            foreach (var hwnd in hwnds)
             {
-                if (!teamsPids.Contains(window.Current.ProcessId)) continue;
-                // An active meeting (has the hangup button) always wins.
-                if (FindIn(window, "hangup-button") is not null)
+                IUIAutomationElement? container = null;
+                IUIAutomationElement? match = null;
+                try
                 {
-                    _windowIsPreJoin = false;
-                    return window;
+                    container = automation.ElementFromHandle(hwnd);
+                    if (container is null) continue;
+
+                    match = container.FindFirst(UiaTreeScope.Descendants, orCond);
+                    if (match is null)
+                    {
+                        // Some pre-join variants render "Join now" without the AutomationId; fall back
+                        // to the conventional window title so we still detect the pre-join screen.
+                        if (preJoinHwnd == IntPtr.Zero && WindowTitleStartsWith(hwnd, "Meeting join"))
+                            preJoinHwnd = hwnd;
+                        continue;
+                    }
+
+                    var aid = match.GetCurrentPropertyValue(UIA_AutomationIdPropertyId) as string;
+                    if (string.Equals(aid, "hangup-button", StringComparison.Ordinal))
+                        return (hwnd, false); // an active meeting always wins
+                    if (preJoinHwnd == IntPtr.Zero)
+                        preJoinHwnd = hwnd;   // remember pre-join, keep scanning for a real meeting
                 }
-                // Otherwise remember a pre-join window. The title is usually "Meeting join…",
-                // but sometimes it's just the meeting subject, so detect the screen structurally
-                // by its "Join now" button (prejoin-join-button).
-                if (preJoin is null && IsPreJoinWindow(window))
+                catch { /* window vanished mid-probe */ }
+                finally
                 {
-                    preJoin = window;
+                    if (match is not null) Marshal.ReleaseComObject(match);
+                    if (container is not null) Marshal.ReleaseComObject(container);
                 }
             }
-            catch { /* skip windows that vanish mid-enumeration */ }
+        }
+        catch (Exception ex) { Log.Error("COM meeting window search failed", ex); }
+        finally
+        {
+            if (orCond is not null) Marshal.ReleaseComObject(orCond);
+            if (prejoinCond is not null) Marshal.ReleaseComObject(prejoinCond);
+            if (hangupCond is not null) Marshal.ReleaseComObject(hangupCond);
         }
 
-        if (preJoin is not null)
+        return preJoinHwnd == IntPtr.Zero ? (IntPtr.Zero, false) : (preJoinHwnd, true);
+    }
+
+    /// <summary>Visible top-level windows owned by one of the given Teams processes (Win32 only).</summary>
+    private static List<IntPtr> GetTopLevelWindows(HashSet<int> pids)
+    {
+        var list = new List<IntPtr>(16);
+        try
         {
-            _windowIsPreJoin = true;
-            return preJoin;
+            EnumWindows((h, _) =>
+            {
+                if (IsWindowVisible(h))
+                {
+                    GetWindowThreadProcessId(h, out uint wpid);
+                    if (pids.Contains((int)wpid)) list.Add(h);
+                }
+                return true;
+            }, IntPtr.Zero);
         }
-        return null;
+        catch (Exception ex) { Log.Error("EnumWindows failed", ex); }
+        return list;
+    }
+
+    private static bool WindowTitleStartsWith(IntPtr hwnd, string prefix)
+    {
+        try
+        {
+            Span<char> buf = stackalloc char[256];
+            int len = GetWindowTextW(hwnd, ref MemoryMarshal.GetReference(buf), buf.Length);
+            if (len <= 0) return false;
+            ReadOnlySpan<char> title = buf[..len];
+            return title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -342,6 +437,11 @@ public sealed class TeamsAutomation : IDisposable
             _selfVideo = null;
         }
 
+        // The self tile is often absent (camera off, no video), so a full descendant Image walk
+        // would otherwise run on every poll for the whole meeting. Back off between misses so a
+        // missing tile costs nothing on most polls.
+        if (Environment.TickCount64 < _selfVideoRetryAfter) return null;
+
         try
         {
             var images = window.FindAll(TreeScope.Descendants,
@@ -360,6 +460,8 @@ public sealed class TeamsAutomation : IDisposable
             }
         }
         catch { }
+
+        _selfVideoRetryAfter = Environment.TickCount64 + SelfTileRefindCooldownMs;
         return null;
     }
 
@@ -451,25 +553,68 @@ public sealed class TeamsAutomation : IDisposable
 
     // ---- Process detection --------------------------------------------------
 
-    private static bool IsTeamsRunning() => GetTeamsPids().Count > 0;
+    private static readonly HashSet<string> TeamsProcessNameSet =
+        new(TeamsProcessNames, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// PIDs of the running Teams processes, via a single Toolhelp process snapshot. This is far
+    /// cheaper than <c>Process.GetProcessesByName</c> (which enumerates every process on the system
+    /// and allocates a managed <c>Process</c> — a handle open plus perf read — for each, once per
+    /// name) and it runs on every poll, so the cost matters.
+    /// </summary>
     private static HashSet<int> GetTeamsPids()
     {
         var pids = new HashSet<int>();
-        foreach (var name in TeamsProcessNames)
+        IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return pids;
+        try
         {
-            try
+            var entry = new PROCESSENTRY32W { dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32W>() };
+            if (Process32FirstW(snapshot, ref entry))
             {
-                foreach (var p in Process.GetProcessesByName(name))
+                do
                 {
-                    pids.Add(p.Id);
-                    p.Dispose();
+                    var exe = entry.szExeFile;
+                    int dot = exe.LastIndexOf('.');
+                    var bare = dot > 0 ? exe[..dot] : exe; // strip ".exe" to match the bare names
+                    if (TeamsProcessNameSet.Contains(bare))
+                        pids.Add((int)entry.th32ProcessID);
                 }
+                while (Process32NextW(snapshot, ref entry));
             }
-            catch { }
         }
+        catch (Exception ex) { Log.Error("process snapshot failed", ex); }
+        finally { CloseHandle(snapshot); }
         return pids;
     }
+
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PROCESSENTRY32W
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    private static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    private static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
 
     // ---- Audio device selection ---------------------------------------------
 
@@ -487,11 +632,16 @@ public sealed class TeamsAutomation : IDisposable
             return false;
         }
 
-        lock (_uia)
+        if (!Monitor.TryEnter(_uia, PressLockTimeoutMs))
+        {
+            Log.Warn("SetAudioDevices timed out waiting for the UIA lock; abandoning");
+            return false;
+        }
+        try
         {
             try
             {
-                var window = ResolveMeetingWindow(IsTeamsRunning());
+                var window = ResolveMeetingWindow(GetTeamsPids());
                 if (window is null) return false;
 
                 // The pre-join screen has no combined audio panel: it has separate "open microphone
@@ -530,6 +680,7 @@ public sealed class TeamsAutomation : IDisposable
             }
             catch (Exception ex) { Log.Error("SetAudioDevices failed", ex); return false; }
         }
+        finally { Monitor.Exit(_uia); }
     }
 
     /// <summary>
@@ -582,7 +733,7 @@ public sealed class TeamsAutomation : IDisposable
         if (item is null)
         {
             Log.Warn($"audio device not found in panel: {deviceId}");
-            DumpMenuItems();
+            if (VerboseUia) DumpMenuItems();
             return false;
         }
 
@@ -657,11 +808,20 @@ public sealed class TeamsAutomation : IDisposable
         IntPtr previousForeground = restoreFocus ? GetForegroundWindow() : IntPtr.Zero;
         IntPtr[] windowOrder = restoreFocus ? CaptureWindowOrder() : Array.Empty<IntPtr>();
         bool result = false;
+        bool locked = false;
         try
         {
-            lock (_uia)
+            // Bound how long a press waits for the shared UIA lock. If the engine is busy (e.g. a
+            // slow UIA search is holding it), abandon the press rather than let it queue and fire
+            // much later — a Stream Deck press should act promptly or not at all.
+            locked = Monitor.TryEnter(_uia, PressLockTimeoutMs);
+            if (!locked)
             {
-                var window = ResolveMeetingWindow(IsTeamsRunning());
+                Log.Warn($"Trigger {d.Id} timed out waiting for the UIA lock; abandoning press");
+                return false;
+            }
+            {
+                var window = ResolveMeetingWindow(GetTeamsPids());
                 if (window is null) return false;
 
                 // On the pre-join screen the mic/camera buttons have dynamic ids, so locate them by
@@ -692,8 +852,19 @@ public sealed class TeamsAutomation : IDisposable
         }
         finally
         {
+            if (locked) Monitor.Exit(_uia);
             if (restoreFocus)
-                RestoreWindowOrder(windowOrder, previousForeground);
+            {
+                // Opening the reaction flyout unavoidably foregrounds Teams, and Teams re-raises its
+                // window asynchronously (sometimes more than once). Restoring inline just races that
+                // raise — the stack flashes back to correct, then Teams pops forward again. So for
+                // reactions we restore on a background thread after Teams settles; every other action
+                // is focus-free and restores inline (a no-op when nothing moved).
+                if (d.Kind == ActionKind.Reaction)
+                    RestoreWindowOrderDeferred(windowOrder, previousForeground);
+                else
+                    RestoreWindowOrder(windowOrder, previousForeground);
+            }
         }
         return result;
     }
@@ -780,20 +951,44 @@ public sealed class TeamsAutomation : IDisposable
             Invoke(react); // fallback
         }
 
-        // Poll briefly for the reaction item (it lives in a popup, not the meeting window
-        // subtree). Only search AFTER expanding, and break the moment it appears.
-        var idCond = new PropertyCondition(AutomationElement.AutomationIdProperty, reactionId);
-        AutomationElement? target = null;
-        for (int i = 0; i < 25 && target is null; i++)
+        // Poll briefly for the reaction item (it lives in a popup, not the meeting window subtree),
+        // then actuate it with the focus-free MSAA default action via the COM client. Managed
+        // InvokePattern.Invoke foregrounds Teams (its focus change is async and races the window-
+        // order restore in Trigger, leaving Teams stuck in front), so we use the same focus-free
+        // path as the toolbar controls. Bounded by a wall-clock budget, stops the moment the item
+        // is found (whether or not it actuated) so a slow desktop provider can't hold the lock, and
+        // every COM element is released.
+        bool ok = false;
+        var automation = ComAutomation;
+        object? idCond = null;
+        IUIAutomationElement? root = null;
+        try
         {
-            try { target = AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond); }
-            catch { }
-            if (target is null) Thread.Sleep(15);
+            idCond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, reactionId);
+            root = automation.GetRootElement();
+            long deadline = Environment.TickCount64 + ReactionSearchBudgetMs;
+            while (!ok && Environment.TickCount64 < deadline)
+            {
+                IUIAutomationElement? target = null;
+                try { target = root.FindFirst(UiaTreeScope.Descendants, idCond); }
+                catch { }
+                if (target is not null)
+                {
+                    try { ok = ComDoDefaultAction(target); }
+                    finally { Marshal.ReleaseComObject(target); }
+                    break; // found the item; never keep walking the desktop
+                }
+                Thread.Sleep(15);
+            }
+        }
+        catch (Exception ex) { Log.Error($"reaction search failed: {reactionId}", ex); }
+        finally
+        {
+            if (root is not null) Marshal.ReleaseComObject(root);
+            if (idCond is not null) Marshal.ReleaseComObject(idCond);
         }
 
-        bool ok = false;
-        if (target is not null) ok = Invoke(target);
-        else Log.Warn($"reaction item not found: {reactionId}");
+        if (!ok) Log.Warn($"reaction item not found or not actionable: {reactionId}");
 
         CloseReactionFlyout(expand);
         return ok;
@@ -923,6 +1118,7 @@ public sealed class TeamsAutomation : IDisposable
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr hWnd, ref char lpString, int nMaxCount);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll")] private static extern IntPtr BeginDeferWindowPos(int nNumWindows);
     [DllImport("user32.dll")] private static extern IntPtr DeferWindowPos(
@@ -952,6 +1148,55 @@ public sealed class TeamsAutomation : IDisposable
     }
 
     /// <summary>
+    /// Restore the captured window order for an action that unavoidably foregrounds Teams (reactions).
+    /// Runs on a background thread so it never blocks the press, waits for Teams to actually grab the
+    /// foreground and then stop moving windows (rather than racing the async raise and flashing the
+    /// stack back), and only restores while Teams — not the user — still holds the foreground.
+    /// </summary>
+    private static void RestoreWindowOrderDeferred(IntPtr[] order, IntPtr foreground)
+    {
+        if (order.Length == 0 || foreground == IntPtr.Zero) return;
+        Task.Run(() =>
+        {
+            try
+            {
+                var teamsPids = GetTeamsPids();
+                bool ForegroundIsTeams()
+                {
+                    var fg = GetForegroundWindow();
+                    if (fg == IntPtr.Zero) return false;
+                    GetWindowThreadProcessId(fg, out uint pid);
+                    return teamsPids.Contains((int)pid);
+                }
+
+                long deadline = Environment.TickCount64 + RaiseSettleMaxMs;
+
+                // Phase 1: wait for Teams to grab the foreground (its raise is async). Bail if focus
+                // moves somewhere that isn't Teams and isn't the pre-press window (the user took over).
+                while (Environment.TickCount64 < deadline
+                       && GetForegroundWindow() == foreground && !ForegroundIsTeams())
+                    Thread.Sleep(RaiseSettlePollMs);
+
+                if (!ForegroundIsTeams()) return; // Teams never stole focus, or the user is elsewhere
+
+                // Phase 2: wait for Teams to finish raising (foreground stops changing).
+                IntPtr last = GetForegroundWindow();
+                int stable = 0;
+                while (Environment.TickCount64 < deadline && stable < RaiseSettleStable)
+                {
+                    Thread.Sleep(RaiseSettlePollMs);
+                    var fg = GetForegroundWindow();
+                    if (fg == last) stable++; else { stable = 0; last = fg; }
+                }
+
+                if (!ForegroundIsTeams()) return; // user grabbed focus while it settled
+                RestoreWindowOrder(order, foreground);
+            }
+            catch (Exception ex) { Log.Error("deferred window-order restore failed", ex); }
+        });
+    }
+
+    /// <summary>
     /// Reapply a previously captured z-order so the exact window stacking from before the
     /// action is restored, then re-activate the window that was actually focused. No-op when
     /// the foreground never changed.
@@ -960,12 +1205,22 @@ public sealed class TeamsAutomation : IDisposable
     {
         if (order.Length == 0 && foreground == IntPtr.Zero) return;
 
-        // Reapply the captured stacking if the z-order actually changed. We compare the full
-        // order (not just the foreground window) because Teams can raise the meeting window
+        // Reapply the captured stacking if the z-order or the foreground actually changed. We compare
+        // the full order (not just the foreground window) because Teams can raise the meeting window
         // above other windows even after focus has already returned to the user's window.
         var current = CaptureWindowOrder();
-        if (order.Length > 0 && !SameOrder(order, current))
+        bool foregroundChanged = foreground != IntPtr.Zero && GetForegroundWindow() != foreground;
+        if (order.Length > 0 && (foregroundChanged || !SameOrder(order, current)))
         {
+            // Attach our input to the thread that currently owns the foreground (Teams) so the OS
+            // lets us restack windows above it. A background process is otherwise blocked from
+            // reordering windows above the foreground window (the foreground lock), which is why the
+            // focused window came back but the windows sitting on top of Teams did not.
+            IntPtr fg = GetForegroundWindow();
+            uint fgThread = fg != IntPtr.Zero ? GetWindowThreadProcessId(fg, out _) : 0;
+            uint thisThread = GetCurrentThreadId();
+            bool attached = fgThread != 0 && fgThread != thisThread
+                            && AttachThreadInput(thisThread, fgThread, true);
             try
             {
                 var hdwp = BeginDeferWindowPos(order.Length);
@@ -985,10 +1240,14 @@ public sealed class TeamsAutomation : IDisposable
                 }
             }
             catch (Exception ex) { Log.Error("RestoreWindowOrder failed", ex); }
+            finally
+            {
+                if (attached) AttachThreadInput(thisThread, fgThread, false);
+            }
         }
 
         // Re-activate the window that actually had focus (also restores keyboard input).
-        if (foreground != IntPtr.Zero && GetForegroundWindow() != foreground)
+        if (foregroundChanged)
             RestoreForeground(foreground);
     }
 
