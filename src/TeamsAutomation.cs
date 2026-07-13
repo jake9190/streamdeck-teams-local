@@ -22,16 +22,12 @@ public sealed class TeamsAutomation : IDisposable
     private const int SelfTileRefindCooldownMs = 3000; // min gap between full self-video-tile searches after a miss
     private const int PressLockTimeoutMs = 3500;     // abandon a press if the UIA lock isn't free within this
     private const int ReactionSearchBudgetMs = 1500; // max wall-clock spent hunting for a reaction flyout item
+    private const int AudioDeviceSearchBudgetMs = 700; // max wall-clock per device selection (bounds the UIA lock hold)
     private const int RaiseSettlePollMs = 60;        // poll interval while waiting for Teams' async raise to settle
     private const int RaiseSettleStable = 3;         // consecutive stable polls that mean Teams stopped raising
     private const int RaiseSettleMaxMs = 1200;       // give up waiting for the raise/settle after this
 
     private static readonly string[] TeamsProcessNames = { "ms-teams", "msteams", "Teams" };
-
-    // Opt-in verbose UIA diagnostics (e.g. dumping the device-picker tree). Off by default because
-    // those dumps do a full desktop descendant walk; enable with MSTEAMS_LOCAL_VERBOSE=1.
-    private static readonly bool VerboseUia =
-        Environment.GetEnvironmentVariable("MSTEAMS_LOCAL_VERBOSE") is "1" or "true";
 
     private readonly object _uia = new();        // serialize UIA work across poll + actions
     private readonly object _stateGate = new();
@@ -218,7 +214,7 @@ public sealed class TeamsAutomation : IDisposable
                     if (IsPreJoinWindow(_meetingWindow))
                         return _meetingWindow;
                 }
-                else if (GetControl(_meetingWindow, "hangup-button") is not null)
+                else if (IsActiveMeetingWindow(_meetingWindow))
                 {
                     return _meetingWindow;
                 }
@@ -250,6 +246,11 @@ public sealed class TeamsAutomation : IDisposable
         return found;
     }
 
+    private bool IsActiveMeetingWindow(AutomationElement window) =>
+        GetControl(window, "hangup-button") is not null
+        || GetControl(window, "microphone-button") is not null
+        || GetControl(window, "video-button") is not null;
+
     private AutomationElement? FindMeetingWindow(HashSet<int> teamsPids)
     {
         if (teamsPids.Count == 0) return null;
@@ -279,13 +280,18 @@ public sealed class TeamsAutomation : IDisposable
         if (hwnds.Count == 0) return (IntPtr.Zero, false);
 
         var automation = ComAutomation;
-        object? hangupCond = null, prejoinCond = null, orCond = null;
+        object? hangupCond = null, microphoneCond = null, videoCond = null;
+        object? meetingCond = null, meetingOrVideoCond = null, prejoinCond = null, anyCond = null;
         IntPtr preJoinHwnd = IntPtr.Zero;
         try
         {
             hangupCond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, "hangup-button");
+            microphoneCond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, "microphone-button");
+            videoCond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, "video-button");
+            meetingCond = automation.CreateOrCondition(hangupCond, microphoneCond);
+            meetingOrVideoCond = automation.CreateOrCondition(meetingCond, videoCond);
             prejoinCond = automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, "prejoin-join-button");
-            orCond = automation.CreateOrCondition(hangupCond, prejoinCond);
+            anyCond = automation.CreateOrCondition(meetingOrVideoCond, prejoinCond);
 
             foreach (var hwnd in hwnds)
             {
@@ -296,7 +302,7 @@ public sealed class TeamsAutomation : IDisposable
                     container = automation.ElementFromHandle(hwnd);
                     if (container is null) continue;
 
-                    match = container.FindFirst(UiaTreeScope.Descendants, orCond);
+                    match = container.FindFirst(UiaTreeScope.Descendants, anyCond);
                     if (match is null)
                     {
                         // Some pre-join variants render "Join now" without the AutomationId; fall back
@@ -307,10 +313,10 @@ public sealed class TeamsAutomation : IDisposable
                     }
 
                     var aid = match.GetCurrentPropertyValue(UIA_AutomationIdPropertyId) as string;
-                    if (string.Equals(aid, "hangup-button", StringComparison.Ordinal))
-                        return (hwnd, false); // an active meeting always wins
-                    if (preJoinHwnd == IntPtr.Zero)
+                    if (string.Equals(aid, "prejoin-join-button", StringComparison.Ordinal))
                         preJoinHwnd = hwnd;   // remember pre-join, keep scanning for a real meeting
+                    else
+                        return (hwnd, false); // any active-meeting toolbar signal always wins
                 }
                 catch { /* window vanished mid-probe */ }
                 finally
@@ -323,8 +329,12 @@ public sealed class TeamsAutomation : IDisposable
         catch (Exception ex) { Log.Error("COM meeting window search failed", ex); }
         finally
         {
-            if (orCond is not null) Marshal.ReleaseComObject(orCond);
+            if (anyCond is not null) Marshal.ReleaseComObject(anyCond);
             if (prejoinCond is not null) Marshal.ReleaseComObject(prejoinCond);
+            if (meetingOrVideoCond is not null) Marshal.ReleaseComObject(meetingOrVideoCond);
+            if (meetingCond is not null) Marshal.ReleaseComObject(meetingCond);
+            if (videoCond is not null) Marshal.ReleaseComObject(videoCond);
+            if (microphoneCond is not null) Marshal.ReleaseComObject(microphoneCond);
             if (hangupCond is not null) Marshal.ReleaseComObject(hangupCond);
         }
 
@@ -632,6 +642,11 @@ public sealed class TeamsAutomation : IDisposable
             return false;
         }
 
+        // Resolve the Windows friendly names up front (outside the UIA lock, since Core Audio
+        // enumeration is unrelated to UIA) so selection can fall back to matching a device list item
+        // by Name when Teams no longer stamps the endpoint id on the item's AutomationId.
+        var (micName, speakerName) = ResolveDeviceNames(micDeviceId, speakerDeviceId);
+
         if (!Monitor.TryEnter(_uia, PressLockTimeoutMs))
         {
             Log.Warn("SetAudioDevices timed out waiting for the UIA lock; abandoning");
@@ -647,7 +662,7 @@ public sealed class TeamsAutomation : IDisposable
                 // The pre-join screen has no combined audio panel: it has separate "open microphone
                 // options" / "open speaker options" buttons that each open a device list.
                 if (_windowIsPreJoin)
-                    return SetAudioDevicesPreJoin(window, (IntPtr)window.Current.NativeWindowHandle, micDeviceId, speakerDeviceId);
+                    return SetAudioDevicesPreJoin(window, (IntPtr)window.Current.NativeWindowHandle, micDeviceId, speakerDeviceId, micName, speakerName);
 
                 var configure = FindIn(window, "audio-button-configure");
                 if (configure is null) { Log.Warn("audio-button-configure not found"); return false; }
@@ -665,8 +680,8 @@ public sealed class TeamsAutomation : IDisposable
                 }
 
                 bool any = false;
-                if (!string.IsNullOrEmpty(speakerDeviceId)) any |= SelectAudioDevice(window, speakerDeviceId!);
-                if (!string.IsNullOrEmpty(micDeviceId)) any |= SelectAudioDevice(window, micDeviceId!);
+                if (!string.IsNullOrEmpty(speakerDeviceId)) any |= SelectAudioDevice(window, speakerDeviceId!, speakerName);
+                if (!string.IsNullOrEmpty(micDeviceId)) any |= SelectAudioDevice(window, micDeviceId!, micName);
 
                 // Close the panel.
                 try
@@ -689,57 +704,75 @@ public sealed class TeamsAutomation : IDisposable
     /// Each picker is a toggle panel that stays open after selection, so it is closed by re-clicking
     /// its button.
     /// </summary>
-    private bool SetAudioDevicesPreJoin(AutomationElement window, IntPtr hwnd, string? micId, string? speakerId)
+    private bool SetAudioDevicesPreJoin(AutomationElement window, IntPtr hwnd, string? micId, string? speakerId, string? micName, string? speakerName)
     {
         bool any = false;
         if (!string.IsNullOrEmpty(speakerId))
-            any |= SelectPreJoinDevice(window, hwnd, "open speaker options", speakerId!);
+            any |= SelectPreJoinDevice(window, hwnd, "open speaker options", speakerId!, speakerName);
         if (!string.IsNullOrEmpty(micId))
-            any |= SelectPreJoinDevice(window, hwnd, "open microphone options", micId!);
+            any |= SelectPreJoinDevice(window, hwnd, "open microphone options", micId!, micName);
         return any;
     }
 
     /// <summary>Opens a pre-join device picker, selects the configured device, then closes the picker.</summary>
-    private bool SelectPreJoinDevice(AutomationElement window, IntPtr hwnd, string buttonName, string deviceId)
+    private bool SelectPreJoinDevice(AutomationElement window, IntPtr hwnd, string buttonName, string deviceId, string? deviceName)
     {
         if (!ActuateNamed(window, hwnd, buttonName)) return false;
         Log.Info($"prejoin select '{buttonName}' id={deviceId}");
-        bool selected = SelectAudioDevice(window, deviceId);
+        bool selected = SelectAudioDevice(window, deviceId, deviceName);
         // The picker is a toggle panel that remains open after a selection; re-click to close it.
         Thread.Sleep(80);
         ActuateNamed(window, hwnd, buttonName);
         return selected;
     }
 
-    /// <summary>Selects the audio device list item whose AutomationId matches <paramref name="deviceId"/>.</summary>
-    private bool SelectAudioDevice(AutomationElement window, string deviceId)
+    /// <summary>Candidate control types for a device list entry (used by both the name-fallback
+    /// search and the diagnostic dump).</summary>
+    private static readonly Condition DeviceItemCondition = new OrCondition(
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem),
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton));
+
+    /// <summary>
+    /// Resolves the Windows friendly names for the requested endpoint ids in a single Core Audio
+    /// enumeration, so device selection can match a list item by Name when the endpoint-id
+    /// AutomationId is absent.
+    /// </summary>
+    private static (string? micName, string? speakerName) ResolveDeviceNames(string? micId, string? speakerId)
     {
-        // The panel renders asynchronously after opening; poll briefly for the item. The pre-join
-        // device picker opens as a popup menu rooted at the desktop (outside the window subtree),
-        // so fall back to searching from the root element.
-        var idCond = new PropertyCondition(AutomationElement.AutomationIdProperty, deviceId);
-        AutomationElement? item = null;
-        for (int i = 0; i < 30 && item is null; i++)
+        string? micName = null, speakerName = null;
+        try
         {
-            try { item = FindIn(window, deviceId); }
-            catch { }
-            if (item is null)
+            foreach (var e in AudioEndpoints.Enumerate())
             {
-                try { item = AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond); }
-                catch { }
+                if (!string.IsNullOrEmpty(micId) && string.Equals(e.Id, micId, StringComparison.OrdinalIgnoreCase)) micName = e.Name;
+                if (!string.IsNullOrEmpty(speakerId) && string.Equals(e.Id, speakerId, StringComparison.OrdinalIgnoreCase)) speakerName = e.Name;
             }
-            if (item is null) Thread.Sleep(20);
         }
+        catch (Exception ex) { Log.Error("resolve device names failed", ex); }
+        return (micName, speakerName);
+    }
+
+    /// <summary>
+    /// Selects the audio device list item for <paramref name="deviceId"/>. Matches first by
+    /// AutomationId (historically the Core Audio endpoint id) and — because newer Teams builds no
+    /// longer stamp the endpoint id on the item — falls back to a menu/list item whose Name contains
+    /// the device's Windows friendly name. Bounded by a wall-clock budget so a missing device never
+    /// holds the shared UIA lock long enough to make other Stream Deck presses time out.
+    /// </summary>
+    private bool SelectAudioDevice(AutomationElement window, string deviceId, string? deviceName)
+    {
+        var item = FindAudioDeviceItem(window, deviceId, deviceName);
         if (item is null)
         {
-            Log.Warn($"audio device not found in panel: {deviceId}");
-            if (VerboseUia) DumpMenuItems();
+            Log.Warn($"audio device not found in panel: {deviceId} name='{deviceName}'");
+            DumpMenuItems();
             return false;
         }
 
         try
         {
-            Log.Info($"select audio device -> name='{item.Current.Name}' type={item.Current.ControlType.ProgrammaticName}");
+            Log.Info($"select audio device -> name='{item.Current.Name}' aid='{item.Current.AutomationId}' type={item.Current.ControlType.ProgrammaticName}");
             // A real click selects the item AND dismisses the picker flyout (the programmatic
             // Select/Invoke patterns leave the flyout open). Fall back to the patterns if the item
             // has no on-screen point.
@@ -754,8 +787,61 @@ public sealed class TeamsAutomation : IDisposable
         catch (Exception ex) { Log.Error($"select audio device failed: {deviceId}", ex); return false; }
     }
 
-    /// <summary>Logs every MenuItem/ListItem/Button currently visible under the desktop (used to
-    /// diagnose which control identifies the pre-join device picker entries).</summary>
+    /// <summary>
+    /// Locates the audio device list item within a bounded wall-clock budget. The panel renders
+    /// asynchronously, so the search is retried until the deadline; it prefers an exact AutomationId
+    /// match (meeting-window subtree first, then the desktop, since the picker can open as a popup
+    /// outside the window) and falls back to a menu/list/radio item whose Name contains the device's
+    /// friendly name.
+    /// </summary>
+    private AutomationElement? FindAudioDeviceItem(AutomationElement window, string deviceId, string? deviceName)
+    {
+        var idCond = new PropertyCondition(AutomationElement.AutomationIdProperty, deviceId);
+        long deadline = Environment.TickCount64 + AudioDeviceSearchBudgetMs;
+        do
+        {
+            try { if (window.FindFirst(TreeScope.Descendants, idCond) is { } inWindow) return inWindow; }
+            catch { }
+            try { if (AutomationElement.RootElement.FindFirst(TreeScope.Descendants, idCond) is { } onDesktop) return onDesktop; }
+            catch { }
+
+            if (!string.IsNullOrEmpty(deviceName))
+            {
+                var byName = FindDeviceItemByName(window, deviceName!)
+                             ?? FindDeviceItemByName(AutomationElement.RootElement, deviceName!);
+                if (byName is not null) return byName;
+            }
+
+            Thread.Sleep(25);
+        }
+        while (Environment.TickCount64 < deadline);
+        return null;
+    }
+
+    /// <summary>Finds a menu/list/radio item under <paramref name="root"/> whose Name contains
+    /// <paramref name="deviceName"/> (the Windows friendly name Teams shows for the device).</summary>
+    private static AutomationElement? FindDeviceItemByName(AutomationElement root, string deviceName)
+    {
+        try
+        {
+            var items = root.FindAll(TreeScope.Descendants, DeviceItemCondition);
+            foreach (AutomationElement e in items)
+            {
+                try
+                {
+                    var n = e.Current.Name;
+                    if (!string.IsNullOrEmpty(n) && n.IndexOf(deviceName, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return e;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>Logs every MenuItem/ListItem/RadioButton/ComboBox currently visible under the desktop
+    /// (used to diagnose which control identifies the device picker entries when selection fails).</summary>
     private static void DumpMenuItems()
     {
         try
@@ -764,7 +850,8 @@ public sealed class TeamsAutomation : IDisposable
                 new OrCondition(
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem),
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton)));
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox)));
             Log.Info($"--- device picker dump: {scan.Count} item(s) ---");
             foreach (AutomationElement e in scan)
             {
