@@ -926,7 +926,7 @@ public sealed class TeamsAutomation : IDisposable
                         : InvokeControl(window, "video-button"),
                     ActionKind.RaiseHand => InvokeControl(window, "raisehands-button"),
                     ActionKind.ShareScreen => InvokeControl(window, "share-button"),
-                    ActionKind.Leave => InvokeControl(window, "hangup-button"),
+                    ActionKind.Leave => LeaveMeeting(window),
                     ActionKind.Reaction => SendReaction(window, d.ReactionAutomationId!),
                     _ => false,
                 };
@@ -963,6 +963,18 @@ public sealed class TeamsAutomation : IDisposable
         IntPtr hwnd = (IntPtr)window.Current.NativeWindowHandle;
         if (hwnd == IntPtr.Zero) { Log.Warn($"meeting window has no handle for {id}"); return false; }
         return ComActuate(hwnd, id);
+    }
+
+    private bool LeaveMeeting(AutomationElement window)
+    {
+        if (InvokeControl(window, "hangup-button")) return true;
+
+        var leave = GetControl(window, "hangup-button");
+        if (leave is null) { Log.Warn("leave control not found"); return false; }
+
+        bool clicked = ClickElement(leave);
+        Log.Info($"actuated leave via Click={clicked}");
+        return clicked;
     }
 
     // ---- Focus-free MSAA actuation (COM UI Automation) ----------------------
